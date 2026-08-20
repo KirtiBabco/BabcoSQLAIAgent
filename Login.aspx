@@ -30,7 +30,7 @@
         <div class="card">
             <div class="eyebrow">Secure Sign In</div>
             <h2>Welcome back</h2>
-            <p class="muted">Use your organization Microsoft account. Admin access is controlled by the configured admin email list.</p>
+            <p class="muted">Use your organization Microsoft account. Microsoft sign-in is handled by Azure App Service Authentication.</p>
             <asp:Button ID="btnEntra" runat="server" Text="Sign in with Microsoft Entra ID" CssClass="btn entra" OnClick="btnEntra_Click" />
             <asp:Button ID="btnTemporary" runat="server" Text="Continue Without Microsoft (Temporary)" CssClass="btn test" OnClick="btnTemporary_Click" />
             <asp:Panel ID="pnlLocalTest" runat="server">
@@ -39,7 +39,7 @@
             </asp:Panel>
             <asp:Label ID="lblMessage" runat="server" CssClass="msg" Visible="false"></asp:Label>
             <div class="status"><asp:Literal ID="litConfigStatus" runat="server"></asp:Literal></div>
-            <div class="secure">&#128274; API keys and Entra client secrets are read from Windows environment variables, not stored in this page.</div>
+            <div class="secure">&#128274; Microsoft authentication is managed by Azure Easy Auth. API keys remain server-side.</div>
         </div>
     </section>
 </div>
