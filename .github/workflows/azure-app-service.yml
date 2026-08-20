@@ -1,4 +1,4 @@
-name: Check Babco SQL AI Agent live status
+name: Deploy Babco SQL AI Agent to Azure App Service
 
 on:
   push:
@@ -6,56 +6,157 @@ on:
   workflow_dispatch:
 
 permissions:
+  id-token: write
   contents: write
 
 env:
-  LIVE_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
+  AZURE_RESOURCE_GROUP: rg-babco-rnd-sandbox
+  AZURE_WEBAPP_NAME: babco-sqlagent-wf-2c606af4
+  LOGIN_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
+  DEFAULT_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Default.aspx
 
 jobs:
-  verify-live:
+  deploy-and-verify:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Verify live Entra readiness
-        id: health
+      - name: Create deployment ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $r = Invoke-WebRequest -Uri $env:LIVE_URL -UseBasicParsing -TimeoutSec 30
-          $content = $r.Content
-          $http = [int]$r.StatusCode
-          $button = $content -match 'Sign in with Microsoft Entra ID'
-          $incomplete = ($content -match 'Microsoft Entra login setup is incomplete') -or ($content -match 'Entra setup required')
-          $clientMissing = $content -match 'ENTRA_CLIENT_ID'
-          "HTTP_CODE=$http" | Out-File -FilePath $env:RUNNER_TEMP\live.txt -Encoding ascii
-          "BUTTON=$button" | Out-File -FilePath $env:RUNNER_TEMP\live.txt -Append -Encoding ascii
-          "INCOMPLETE=$incomplete" | Out-File -FilePath $env:RUNNER_TEMP\live.txt -Append -Encoding ascii
-          "CLIENT_MISSING=$clientMissing" | Out-File -FilePath $env:RUNNER_TEMP\live.txt -Append -Encoding ascii
-          Write-Host "HTTP=$http Button=$button Incomplete=$incomplete ClientMissing=$clientMissing"
-          if ($http -ne 200) { throw "Live page HTTP $http" }
+          $stage = Join-Path $env:RUNNER_TEMP 'sqlagent-stage'
+          $zip = Join-Path $env:RUNNER_TEMP 'sqlagent.zip'
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Get-ChildItem -Force | Where-Object { $_.Name -notin @('.git','.github') } | ForEach-Object {
+            Copy-Item $_.FullName $stage -Recurse -Force
+          }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+          if (-not (Test-Path $zip)) { throw 'Deployment ZIP was not created.' }
+          "DEPLOY_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Publish safe status
+      - name: Check deployment credentials
+        id: creds
+        shell: bash
+        env:
+          HAS_CLIENT: ${{ secrets.AZURE_CLIENT_ID != '' }}
+          HAS_TENANT: ${{ secrets.AZURE_TENANT_ID != '' }}
+          HAS_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}
+          HAS_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE != '' }}
+        run: |
+          echo "client=$HAS_CLIENT" >> "$GITHUB_OUTPUT"
+          echo "tenant=$HAS_TENANT" >> "$GITHUB_OUTPUT"
+          echo "subscription=$HAS_SUBSCRIPTION" >> "$GITHUB_OUTPUT"
+          echo "publish_profile=$HAS_PUBLISH_PROFILE" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login with OIDC
+        id: azurelogin
+        if: steps.creds.outputs.client == 'true' && steps.creds.outputs.tenant == 'true' && steps.creds.outputs.subscription == 'true'
+        continue-on-error: true
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy with Azure OIDC token
+        id: oidcdeploy
+        if: steps.azurelogin.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          az webapp config appsettings set -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" --settings SCM_DO_BUILD_DURING_DEPLOYMENT=false | Out-Null
+          az webapp start -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" | Out-Null
+          $token = az account get-access-token --query accessToken -o tsv
+          if ([string]::IsNullOrWhiteSpace($token)) { throw 'Azure access token was empty.' }
+          $headers = @{ Authorization = "Bearer $token" }
+          $scm = "https://$($env:AZURE_WEBAPP_NAME).scm.azurewebsites.net/api/zip/site/wwwroot/"
+          Invoke-WebRequest -Uri $scm -Method Put -Headers $headers -ContentType 'application/zip' -InFile $env:DEPLOY_ZIP -UseBasicParsing | Out-Null
+          az webapp restart -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" | Out-Null
+
+      - name: Deploy with publish profile fallback
+        id: profiledeploy
+        if: steps.oidcdeploy.outcome != 'success' && steps.creds.outputs.publish_profile == 'true'
+        continue-on-error: true
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: ${{ env.DEPLOY_ZIP }}
+
+      - name: Verify live temporary login end-to-end
+        id: verify
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Start-Sleep -Seconds 12
+          $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+          $login = $null
+          for ($i=1; $i -le 20; $i++) {
+            try {
+              $login = Invoke-WebRequest -Uri $env:LOGIN_URL -WebSession $session -UseBasicParsing -TimeoutSec 30
+              if ([int]$login.StatusCode -eq 200) { break }
+            } catch { }
+            Start-Sleep -Seconds 5
+          }
+          if ($null -eq $login -or [int]$login.StatusCode -ne 200) { throw 'Login.aspx did not return HTTP 200.' }
+          if ($login.Content -notmatch 'Continue Without Microsoft \(Temporary\)') { throw 'Temporary login button is not present on live Login.aspx.' }
+
+          function Hidden([string]$name, [string]$html) {
+            $pattern = 'name="' + [regex]::Escape($name) + '"[^>]*value="([^"]*)"'
+            $m = [regex]::Match($html, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($m.Success) { return [System.Net.WebUtility]::HtmlDecode($m.Groups[1].Value) }
+            return ''
+          }
+
+          $body = @{
+            '__VIEWSTATE' = Hidden '__VIEWSTATE' $login.Content
+            '__VIEWSTATEGENERATOR' = Hidden '__VIEWSTATEGENERATOR' $login.Content
+            '__EVENTVALIDATION' = Hidden '__EVENTVALIDATION' $login.Content
+            'btnTemporary' = 'Continue Without Microsoft (Temporary)'
+          }
+          $post = Invoke-WebRequest -Uri $env:LOGIN_URL -Method Post -Body $body -WebSession $session -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 30
+          $default = Invoke-WebRequest -Uri $env:DEFAULT_URL -WebSession $session -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30
+          if ([int]$default.StatusCode -ne 200) { throw "Default.aspx returned HTTP $($default.StatusCode)." }
+          if ($default.BaseResponse.ResponseUri.AbsolutePath -match 'Login.aspx') { throw 'Default.aspx redirected back to Login.aspx after temporary login.' }
+          if ($default.Content -notmatch 'Babco SQL AI Agent') { throw 'Default.aspx content marker is missing.' }
+          "LOGIN_HTTP=200" | Out-File $env:RUNNER_TEMP\verify.txt -Encoding ascii
+          "TEMP_BUTTON=true" | Out-File $env:RUNNER_TEMP\verify.txt -Append -Encoding ascii
+          "TEMP_SESSION=true" | Out-File $env:RUNNER_TEMP\verify.txt -Append -Encoding ascii
+          "DEFAULT_HTTP=200" | Out-File $env:RUNNER_TEMP\verify.txt -Append -Encoding ascii
+
+      - name: Publish deployment status
         if: always()
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OIDC_LOGIN: ${{ steps.azurelogin.outcome }}
+          OIDC_DEPLOY: ${{ steps.oidcdeploy.outcome }}
+          PROFILE_DEPLOY: ${{ steps.profiledeploy.outcome }}
+          VERIFY: ${{ steps.verify.outcome }}
+          CLIENT_PRESENT: ${{ steps.creds.outputs.client }}
+          TENANT_PRESENT: ${{ steps.creds.outputs.tenant }}
+          SUBSCRIPTION_PRESENT: ${{ steps.creds.outputs.subscription }}
+          PROFILE_PRESENT: ${{ steps.creds.outputs.publish_profile }}
         run: |
           set -euo pipefail
-          HTTP_CODE=unknown; BUTTON=unknown; INCOMPLETE=unknown; CLIENT_MISSING=unknown
-          if [ -f "$RUNNER_TEMP/live.txt" ]; then
-            HTTP_CODE="$(sed -n 's/^HTTP_CODE=//p' "$RUNNER_TEMP/live.txt" | tr -d '\r')"
-            BUTTON="$(sed -n 's/^BUTTON=//p' "$RUNNER_TEMP/live.txt" | tr -d '\r')"
-            INCOMPLETE="$(sed -n 's/^INCOMPLETE=//p' "$RUNNER_TEMP/live.txt" | tr -d '\r')"
-            CLIENT_MISSING="$(sed -n 's/^CLIENT_MISSING=//p' "$RUNNER_TEMP/live.txt" | tr -d '\r')"
-          fi
           mkdir out && cd out
           {
-            echo "Live URL: $LIVE_URL"
-            echo "HTTP: $HTTP_CODE"
-            echo "Microsoft button: $BUTTON"
-            echo "Entra setup incomplete: $INCOMPLETE"
-            echo "ENTRA_CLIENT_ID missing message: $CLIENT_MISSING"
+            echo "Source commit: $GITHUB_SHA"
+            echo "AZURE_CLIENT_ID present: ${CLIENT_PRESENT:-unknown}"
+            echo "AZURE_TENANT_ID present: ${TENANT_PRESENT:-unknown}"
+            echo "AZURE_SUBSCRIPTION_ID present: ${SUBSCRIPTION_PRESENT:-unknown}"
+            echo "AZURE_WEBAPP_PUBLISH_PROFILE present: ${PROFILE_PRESENT:-unknown}"
+            echo "OIDC login: ${OIDC_LOGIN:-skipped}"
+            echo "OIDC deploy: ${OIDC_DEPLOY:-skipped}"
+            echo "Publish profile deploy: ${PROFILE_DEPLOY:-skipped}"
+            echo "End-to-end temporary login verify: ${VERIFY:-unknown}"
+            if [ -f "$RUNNER_TEMP/verify.txt" ]; then cat "$RUNNER_TEMP/verify.txt"; fi
             echo "Checked: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > status.txt
           git init
@@ -63,6 +164,12 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add status.txt
-          git commit -m 'Publish SQL Agent live auth status'
+          git commit -m 'Publish SQL Agent deployment status'
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin deployment-status
+
+      - name: Fail when deployment or verification failed
+        if: always()
+        shell: pwsh
+        run: |
+          if ('${{ steps.verify.outcome }}' -ne 'success') { throw 'Live temporary-login verification failed.' }
