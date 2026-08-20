@@ -10,45 +10,28 @@ namespace SQL_AI_Agent
         {
             pnlLocalTest.Visible = AuthService.CanUseLocalTestLogin(Request);
             btnEntra.Enabled = true;
-            string redirectUri = AuthService.GetResolvedRedirectUri(Request);
-            if (AuthService.IsEntraConfigured)
-            {
-                litConfigStatus.Text = "<strong>Entra:</strong> Ready"
-                    + "<br/><span class=\"configLine\">Tenant: " + HttpUtility.HtmlEncode(AppConfig.GetEntraTenantSource())
-                    + " &nbsp; | &nbsp; Client: " + HttpUtility.HtmlEncode(AppConfig.GetEntraClientSource())
-                    + " &nbsp; | &nbsp; Secret: " + HttpUtility.HtmlEncode(AppConfig.GetEntraSecretSource()) + "</span>"
-                    + "<br/><span class=\"configLine\">Redirect URI: " + HttpUtility.HtmlEncode(redirectUri) + "</span>";
-            }
-            else
-            {
-                litConfigStatus.Text = "<strong>Entra setup required.</strong> " + HttpUtility.HtmlEncode(AuthService.GetEntraConfigurationStatus())
-                    + "<br/><span class=\"configLine\">Expected redirect URI: " + HttpUtility.HtmlEncode(redirectUri) + "</span>";
-            }
+
+            litConfigStatus.Text =
+                "<strong>Microsoft Entra:</strong> Azure App Service Easy Auth"
+                + "<br/><span class=\"configLine\">No ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET or page-level OAuth configuration is required by this application.</span>"
+                + "<br/><span class=\"configLine\">Sign-in endpoint: /.auth/login/aad</span>";
 
             if (!string.IsNullOrWhiteSpace(Request.QueryString["error"]))
             {
-                ShowMessage("Microsoft Entra returned: " + Request.QueryString["error"] + "\n" + Request.QueryString["error_description"]);
+                ShowMessage("Microsoft sign-in could not be completed. " + Request.QueryString["error"]);
                 return;
             }
 
-            string code = Request.QueryString["code"];
-            string state = Request.QueryString["state"];
-            if (!string.IsNullOrWhiteSpace(code))
+            if (!IsPostBack)
             {
-                try
+                if (!AuthService.IsSignedIn)
+                    AuthService.BootstrapEasyAuthSession(Request);
+
+                if (AuthService.IsSignedIn)
                 {
-                    AuthService.CompleteEntraLogin(Request, code, state);
                     Response.Redirect("~/Default.aspx", false);
                     Context.ApplicationInstance.CompleteRequest();
                 }
-                catch (Exception ex) { ShowMessage(ex.Message); }
-                return;
-            }
-
-            if (!IsPostBack && AuthService.IsSignedIn)
-            {
-                Response.Redirect("~/Default.aspx", false);
-                Context.ApplicationInstance.CompleteRequest();
             }
         }
 
@@ -56,11 +39,13 @@ namespace SQL_AI_Agent
         {
             try
             {
-                string url = AuthService.BuildEntraAuthorizationUrl(Request);
-                Response.Redirect(url, false);
+                Response.Redirect(AuthService.BuildEntraAuthorizationUrl(Request), false);
                 Context.ApplicationInstance.CompleteRequest();
             }
-            catch (Exception ex) { ShowMessage(ex.Message); }
+            catch (Exception ex)
+            {
+                ShowMessage(ex.Message);
+            }
         }
 
         protected void btnTemporary_Click(object sender, EventArgs e)
@@ -77,7 +62,10 @@ namespace SQL_AI_Agent
                 Response.Redirect("~/Default.aspx", false);
                 Context.ApplicationInstance.CompleteRequest();
             }
-            catch (Exception ex) { ShowMessage(ex.Message); }
+            catch (Exception ex)
+            {
+                ShowMessage(ex.Message);
+            }
         }
 
         protected void btnLocalTest_Click(object sender, EventArgs e)
@@ -88,7 +76,10 @@ namespace SQL_AI_Agent
                 Response.Redirect("~/Default.aspx", false);
                 Context.ApplicationInstance.CompleteRequest();
             }
-            catch (Exception ex) { ShowMessage(ex.Message); }
+            catch (Exception ex)
+            {
+                ShowMessage(ex.Message);
+            }
         }
 
         private void ShowMessage(string message)
