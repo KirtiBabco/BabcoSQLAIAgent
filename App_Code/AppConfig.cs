@@ -34,13 +34,6 @@ namespace SQL_AI_Agent
         public static int MaxRows { get { int v; return int.TryParse(Get("MaxRows", "200"), out v) ? v : 200; } }
         public static int CommandTimeoutSeconds { get { int v; return int.TryParse(Get("CommandTimeoutSeconds", "30"), out v) ? v : 30; } }
 
-        public static string EntraClientId { get { return GetEnvironment("ENTRA_CLIENT_ID"); } }
-        public static string EntraTenantId { get { return GetEnvironment("ENTRA_TENANT_ID"); } }
-        public static string EntraClientSecret { get { return GetEnvironment("ENTRA_CLIENT_SECRET"); } }
-        public static string GetEntraTenantSource() { return string.IsNullOrWhiteSpace(EntraTenantId) ? "missing" : "server setting"; }
-        public static string GetEntraClientSource() { return string.IsNullOrWhiteSpace(EntraClientId) ? "missing" : "server setting"; }
-        public static string GetEntraSecretSource() { return string.IsNullOrWhiteSpace(EntraClientSecret) ? "missing" : "server setting"; }
-
         private static string GetEnvironment(string key, string fallback = "")
         {
             string value = Environment.GetEnvironmentVariable(key, EnvironmentVariableTarget.Process);
