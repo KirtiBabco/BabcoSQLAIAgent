@@ -1,0 +1,77 @@
+name: Probe Babco SQL AI Agent Easy Auth
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  LOGIN_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
+  EASY_AUTH_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=/AuthComplete.aspx
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - name: Probe live login and Easy Auth
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $loginHttp = 0
+          $oldClientError = $false
+          $newEasyAuthMarker = $false
+          try {
+            $login = Invoke-WebRequest -Uri $env:LOGIN_URL -UseBasicParsing -TimeoutSec 30
+            $loginHttp = [int]$login.StatusCode
+            $oldClientError = $login.Content -match 'ENTRA_CLIENT_ID'
+            $newEasyAuthMarker = $login.Content -match 'Azure App Service Easy Auth'
+          } catch {
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) { $loginHttp = [int]$_.Exception.Response.StatusCode }
+          }
+
+          $easyHttp = 0
+          $easyLocation = ''
+          try {
+            $easy = Invoke-WebRequest -Uri $env:EASY_AUTH_URL -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30
+            $easyHttp = [int]$easy.StatusCode
+            $easyLocation = [string]$easy.Headers.Location
+          } catch {
+            if ($_.Exception.Response) {
+              if ($_.Exception.Response.StatusCode) { $easyHttp = [int]$_.Exception.Response.StatusCode }
+              $easyLocation = [string]$_.Exception.Response.Headers['Location']
+            }
+          }
+
+          $microsoftRedirect = $easyLocation -match 'login.microsoftonline.com'
+          @(
+            "LOGIN_HTTP=$loginHttp",
+            "LIVE_HAS_OLD_ENTRA_CLIENT_ID_ERROR=$oldClientError",
+            "LIVE_HAS_NEW_EASY_AUTH_MARKER=$newEasyAuthMarker",
+            "EASY_AUTH_HTTP=$easyHttp",
+            "EASY_AUTH_REDIRECTS_TO_MICROSOFT=$microsoftRedirect",
+            "EASY_AUTH_LOCATION=$easyLocation"
+          ) | Set-Content -Path $env:RUNNER_TEMP\auth-probe.txt -Encoding ascii
+          Get-Content $env:RUNNER_TEMP\auth-probe.txt
+
+      - name: Publish auth probe status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir out && cd out
+          cp "$RUNNER_TEMP/auth-probe.txt" status.txt || printf 'probe failed\n' > status.txt
+          printf 'SOURCE_COMMIT=%s\n' "$GITHUB_SHA" >> status.txt
+          printf 'CHECKED=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> status.txt
+          git init
+          git checkout -b auth-status
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt
+          git commit -m 'Publish Easy Auth probe status'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin auth-status
