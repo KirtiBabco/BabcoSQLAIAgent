@@ -1,126 +1,68 @@
-name: Build and deploy Babco SQL AI Agent to Azure App Service
+name: Check Babco SQL AI Agent live status
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: write
 
 env:
-  AZURE_CLIENT_ID: 7a21e1b8-ee78-429e-8051-5dce354e3e1d
-  AZURE_TENANT_ID: 7e3bfe8e-acb5-4e0e-9798-c05331d2940c
-  AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
-  AZURE_RESOURCE_GROUP: rg-babco-rnd-sandbox
-  AZURE_WEBAPP_NAME: babco-sqlagent-wf-2c606af4
   LIVE_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
 
 jobs:
   verify-live:
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Azure login with OIDC
-        id: azurelogin
-        continue-on-error: true
-        uses: azure/login@v2
-        with:
-          client-id: ${{ env.AZURE_CLIENT_ID }}
-          tenant-id: ${{ env.AZURE_TENANT_ID }}
-          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Verify Azure target and server-side settings
-        id: azurecheck
-        if: steps.azurelogin.outcome == 'success'
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $app = az webapp show -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" | ConvertFrom-Json
-          if (-not $app.id) { throw 'Azure Web App was not found.' }
-          $settings = az webapp config appsettings list -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" | ConvertFrom-Json
-          $names = @($settings | ForEach-Object { $_.name })
-          $bap = $names -contains 'BAP_SUPPORT_CONNECTION_STRING'
-          $openai = $names -contains 'OPENAI_API_KEY_DEVELOPMENT'
-          $entra = $names -contains 'ENTRA_CLIENT_ID'
-          "BAP_SETTING=$bap" | Out-File -FilePath $env:RUNNER_TEMP\azure-result.txt -Encoding ascii
-          "OPENAI_SETTING=$openai" | Out-File -FilePath $env:RUNNER_TEMP\azure-result.txt -Append -Encoding ascii
-          "ENTRA_SETTING=$entra" | Out-File -FilePath $env:RUNNER_TEMP\azure-result.txt -Append -Encoding ascii
-
-      - name: Verify live HTTP
+      - name: Verify live Entra readiness
         id: health
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          $code = 0
-          $expected = $false
-          for ($i = 1; $i -le 30; $i++) {
-            try {
-              $r = Invoke-WebRequest -Uri $env:LIVE_URL -UseBasicParsing -TimeoutSec 30
-              $code = [int]$r.StatusCode
-              $expected = $r.Content -match 'Sign in with Microsoft Entra ID'
-            }
-            catch {
-              if ($_.Exception.Response -and $_.Exception.Response.StatusCode) { $code = [int]$_.Exception.Response.StatusCode } else { $code = 0 }
-            }
-            Write-Host "Health $i/30 HTTP $code Expected=$expected"
-            if ($code -eq 200 -and $expected) { break }
-            Start-Sleep -Seconds 6
-          }
-          "HTTP_CODE=$code" | Out-File -FilePath $env:RUNNER_TEMP\health-result.txt -Encoding ascii
-          "EXPECTED_CONTENT=$expected" | Out-File -FilePath $env:RUNNER_TEMP\health-result.txt -Append -Encoding ascii
-          if ($code -ne 200 -or -not $expected) { throw "Application health check failed with HTTP $code" }
+          $ErrorActionPreference = 'Stop'
+          $r = Invoke-WebRequest -Uri $env:LIVE_URL -UseBasicParsing -TimeoutSec 30
+          $content = $r.Content
+          $http = [int]$r.StatusCode
+          $button = $content -match 'Sign in with Microsoft Entra ID'
+          $incomplete = ($content -match 'Microsoft Entra login setup is incomplete') -or ($content -match 'Entra setup required')
+          $clientMissing = $content -match 'ENTRA_CLIENT_ID'
+          "HTTP_CODE=$http" | Out-File -FilePath $env:RUNNER_TEMP\live.txt -Encoding ascii
+          "BUTTON=$button" | Out-File -FilePath $env:RUNNER_TEMP\live.txt -Append -Encoding ascii
+          "INCOMPLETE=$incomplete" | Out-File -FilePath $env:RUNNER_TEMP\live.txt -Append -Encoding ascii
+          "CLIENT_MISSING=$clientMissing" | Out-File -FilePath $env:RUNNER_TEMP\live.txt -Append -Encoding ascii
+          Write-Host "HTTP=$http Button=$button Incomplete=$incomplete ClientMissing=$clientMissing"
+          if ($http -ne 200) { throw "Live page HTTP $http" }
 
-      - name: Publish deployment status
+      - name: Publish safe status
         if: always()
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LOGIN_OUTCOME: ${{ steps.azurelogin.outcome }}
-          AZURECHECK_OUTCOME: ${{ steps.azurecheck.outcome }}
-          HEALTH_OUTCOME: ${{ steps.health.outcome }}
         run: |
           set -euo pipefail
-          mkdir status-branch
-          HTTP_CODE=unknown
-          EXPECTED_CONTENT=unknown
-          BAP_SETTING=unknown
-          OPENAI_SETTING=unknown
-          ENTRA_SETTING=unknown
-          if [ -f "$RUNNER_TEMP/health-result.txt" ]; then
-            HTTP_CODE="$(sed -n 's/^HTTP_CODE=//p' "$RUNNER_TEMP/health-result.txt" | tr -d '\r')"
-            EXPECTED_CONTENT="$(sed -n 's/^EXPECTED_CONTENT=//p' "$RUNNER_TEMP/health-result.txt" | tr -d '\r')"
+          HTTP_CODE=unknown; BUTTON=unknown; INCOMPLETE=unknown; CLIENT_MISSING=unknown
+          if [ -f "$RUNNER_TEMP/live.txt" ]; then
+            HTTP_CODE="$(sed -n 's/^HTTP_CODE=//p' "$RUNNER_TEMP/live.txt" | tr -d '\r')"
+            BUTTON="$(sed -n 's/^BUTTON=//p' "$RUNNER_TEMP/live.txt" | tr -d '\r')"
+            INCOMPLETE="$(sed -n 's/^INCOMPLETE=//p' "$RUNNER_TEMP/live.txt" | tr -d '\r')"
+            CLIENT_MISSING="$(sed -n 's/^CLIENT_MISSING=//p' "$RUNNER_TEMP/live.txt" | tr -d '\r')"
           fi
-          if [ -f "$RUNNER_TEMP/azure-result.txt" ]; then
-            BAP_SETTING="$(sed -n 's/^BAP_SETTING=//p' "$RUNNER_TEMP/azure-result.txt" | tr -d '\r')"
-            OPENAI_SETTING="$(sed -n 's/^OPENAI_SETTING=//p' "$RUNNER_TEMP/azure-result.txt" | tr -d '\r')"
-            ENTRA_SETTING="$(sed -n 's/^ENTRA_SETTING=//p' "$RUNNER_TEMP/azure-result.txt" | tr -d '\r')"
-          fi
+          mkdir out && cd out
           {
-            printf 'Repository: %s\n' "$GITHUB_REPOSITORY"
-            printf 'Source commit: %s\n' "$GITHUB_SHA"
-            printf 'Azure login: %s\n' "${LOGIN_OUTCOME:-unknown}"
-            printf 'Azure config check: %s\n' "${AZURECHECK_OUTCOME:-unknown}"
-            printf 'BAP_SUPPORT_CONNECTION_STRING setting exists: %s\n' "$BAP_SETTING"
-            printf 'OPENAI_API_KEY_DEVELOPMENT setting exists: %s\n' "$OPENAI_SETTING"
-            printf 'ENTRA_CLIENT_ID setting exists: %s\n' "$ENTRA_SETTING"
-            printf 'Live health: %s\n' "${HEALTH_OUTCOME:-unknown}"
-            printf 'Live HTTP: %s\n' "$HTTP_CODE"
-            printf 'Expected login content: %s\n' "$EXPECTED_CONTENT"
-            printf 'Live URL: %s\n' "$LIVE_URL"
-            printf 'Checked: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          } > status-branch/status.txt
-          cd status-branch
+            echo "Live URL: $LIVE_URL"
+            echo "HTTP: $HTTP_CODE"
+            echo "Microsoft button: $BUTTON"
+            echo "Entra setup incomplete: $INCOMPLETE"
+            echo "ENTRA_CLIENT_ID missing message: $CLIENT_MISSING"
+            echo "Checked: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > status.txt
           git init
           git checkout -b deployment-status
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add status.txt
-          git commit -m 'Publish SQL AI Agent Azure deployment status'
+          git commit -m 'Publish SQL Agent live auth status'
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin deployment-status
