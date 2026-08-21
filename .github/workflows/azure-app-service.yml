@@ -1,4 +1,4 @@
-name: Deploy Babco SQL AI Agent to Azure App Service
+name: Deploy Babco SQL AI Agent to Azure
 
 on:
   push:
@@ -14,35 +14,20 @@ env:
   AZURE_TENANT_ID: 7e3bfe8e-acb5-4e0e-9798-c05331d2940c
   AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
   AZURE_RESOURCE_GROUP: rg-babco-rnd-sandbox
-  IDENTITY_NAME: id-cbp-7501-gha-rnd
-  FEDERATED_CREDENTIAL_NAME: fic-kirti-babcosqlaiagent-main
-  OIDC_SUBJECT: repo:KirtiBabco@186008200/BabcoSQLAIAgent@1340622048:ref:refs/heads/main
   WEB_APP: babco-sqlagent-wf-2c606af4
+  SOURCE_PACKAGE_SHA256: b02c69ab1b4ab431f823a2e3327faada3019f1a815470dd445e321128ca2559a
   LOGIN_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
   DEFAULT_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Default.aspx
   EASY_AUTH_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad
-  DEVICE_FLOW_CLIENT_ID: 04b07795-8ddb-461a-bbee-02f9e1bf7b46
-  DEVICE_PUBLIC_KEY_DER_B64: MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnnuY9wa/txtx5PfZkSPu0eFr/tYgTkZTXVYoqYQEfgY/7Q37m4aU73H9Dvkz/pai+OrymiHdtAdbxsGuNgSFX64i++ylcGzmpF+9wnqTNQ5P0d/HUYe2pmB/bzc5sQ549BNtOOttZIazBoDzkA17D6dNARZIFjritfP3kXMyNGXR4qunyx/XgkEOUoy076EZwlzeiM5pzBkCyIh8QK1aqq+7NoAUq/zlp/PBrsWefgWW4Tv6laPFMSCoqeAZfpRPDiPoIq5KlqNSKcSNA7VC8RMC5keA9gygyyOheakI/OD7+d9r/iLy5uVFZp3qFqEiFQ9C9HfHyP/0YgKkzQ5wuQIDAQAB
 
 jobs:
   deploy:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - name: Package source
-        shell: pwsh
-        run: |
-          $stage=Join-Path $env:RUNNER_TEMP 'stage'; $zip=Join-Path $env:RUNNER_TEMP 'site.zip'
-          New-Item -ItemType Directory -Path $stage -Force|Out-Null
-          Get-ChildItem -Force|Where-Object{$_.Name -notin @('.git','.github','.deployment','deploy.cmd')}|ForEach-Object{Copy-Item $_.FullName $stage -Recurse -Force}
-          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
-          "DEPLOY_ZIP=$zip"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Try permanent OIDC
-        id: oidc
-        continue-on-error: true
+      - name: Azure login with permanent GitHub federation
         uses: azure/login@v2
         with:
           client-id: ${{ env.AZURE_CLIENT_ID }}
@@ -50,83 +35,112 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Bootstrap permanent federation once
-        id: bootstrap
-        if: steps.oidc.outcome != 'success'
-        continue-on-error: true
+      - name: Verify server-side settings
+        id: settings
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference='Stop'
-          $dc=Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/${env:AZURE_TENANT_ID}/oauth2/v2.0/devicecode" -ContentType 'application/x-www-form-urlencoded' -Body @{client_id=$env:DEVICE_FLOW_CLIENT_ID;scope='https://management.azure.com/.default offline_access openid profile'}
-          Write-Output "::add-mask::$($dc.device_code)";Write-Output "::add-mask::$($dc.user_code)"
-          $rsa=[Security.Cryptography.RSA]::Create();$read=0;$rsa.ImportSubjectPublicKeyInfo([Convert]::FromBase64String($env:DEVICE_PUBLIC_KEY_DER_B64),[ref]$read)
-          $cipher=[Convert]::ToBase64String($rsa.Encrypt([Text.Encoding]::UTF8.GetBytes([string]$dc.user_code),[Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
-          $d=Join-Path $env:RUNNER_TEMP 'device';New-Item -ItemType Directory -Path $d -Force|Out-Null
-          @('STATE=awaiting_user',"RUN_ID=$env:GITHUB_RUN_ID","VERIFICATION_URI=$($dc.verification_uri)","USER_CODE_CIPHERTEXT_B64=$cipher","EXPIRES_IN=$($dc.expires_in)","CREATED_UTC=$([DateTime]::UtcNow.ToString('o'))")|Set-Content (Join-Path $d 'status.txt') -Encoding ascii
-          Push-Location $d;git init|Out-Null;git checkout -b azure-device-auth-v2|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish encrypted Azure approval code'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin azure-device-auth-v2|Out-Null;Pop-Location
-          $token='';$interval=[Math]::Max([int]$dc.interval,5);$deadline=[DateTime]::UtcNow.AddSeconds([int]$dc.expires_in)
-          while([DateTime]::UtcNow -lt $deadline){Start-Sleep -Seconds $interval;try{$tr=Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/${env:AZURE_TENANT_ID}/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{grant_type='urn:ietf:params:oauth:grant-type:device_code';client_id=$env:DEVICE_FLOW_CLIENT_ID;device_code=[string]$dc.device_code};if($tr.access_token){$token=[string]$tr.access_token;break}}catch{$e=$null;try{$e=$_.ErrorDetails.Message|ConvertFrom-Json}catch{};if($e.error -eq 'authorization_pending'){continue};if($e.error -eq 'slow_down'){$interval+=5;continue};if($e.error -eq 'expired_token'){throw 'Device approval expired.'};if($e.error -eq 'authorization_declined'){throw 'Device approval declined.'}}}
-          if(-not $token){throw 'Device approval timed out.'};Write-Output "::add-mask::$token";Set-Content (Join-Path $env:RUNNER_TEMP 'arm-token.txt') $token -NoNewline
-          $uri="https://management.azure.com/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/${env:AZURE_RESOURCE_GROUP}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${env:IDENTITY_NAME}/federatedIdentityCredentials/${env:FEDERATED_CREDENTIAL_NAME}?api-version=2024-11-30"
-          $body=@{properties=@{issuer='https://token.actions.githubusercontent.com';subject=$env:OIDC_SUBJECT;audiences=@('api://AzureADTokenExchange')}}|ConvertTo-Json -Depth 5
-          $r=Invoke-WebRequest -Method Put -Uri $uri -Headers @{Authorization="Bearer $token"} -ContentType 'application/json' -Body $body -SkipHttpErrorCheck
-          if([int]$r.StatusCode -lt 200 -or [int]$r.StatusCode -ge 300){throw "Federation create failed HTTP $($r.StatusCode): $([string]$r.Content)"}
-          @('STATE=federation_created',"SUBJECT=$env:OIDC_SUBJECT",'AUDIENCE=api://AzureADTokenExchange')|Set-Content (Join-Path $d 'status.txt') -Encoding ascii
-          Push-Location $d;git add status.txt;git commit -m 'Record permanent Azure federation'|Out-Null;git push --force origin azure-device-auth-v2|Out-Null;Pop-Location
+          $settings = az webapp config appsettings list -g $env:AZURE_RESOURCE_GROUP -n $env:WEB_APP | ConvertFrom-Json
+          $sql = @($settings | Where-Object { $_.name -eq 'BAP_SUPPORT_CONNECTION_STRING' })
+          $openai = @($settings | Where-Object { $_.name -eq 'OPENAI_API_KEY_DEVELOPMENT' })
+          $sqlPresent = $sql.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$sql[0].value)
+          $openaiPresent = $openai.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$openai[0].value)
+          "SQL_SETTING_PRESENT=$($sqlPresent.ToString().ToLowerInvariant())" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "OPENAI_SETTING_PRESENT=$($openaiPresent.ToString().ToLowerInvariant())" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          if(-not $sqlPresent){ throw 'BAP_SUPPORT_CONNECTION_STRING is missing on the Azure App Service.' }
 
-      - name: Get ARM token from OIDC
-        if: steps.oidc.outcome == 'success'
+      - name: Reconstruct and validate full source package
+        id: package
         shell: pwsh
         run: |
-          $t=az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv;Write-Output "::add-mask::$t";Set-Content (Join-Path $env:RUNNER_TEMP 'arm-token.txt') $t -NoNewline
+          $ErrorActionPreference='Stop'
+          $parts = Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE 'source-package') -Filter 'part*.b64' | Sort-Object Name
+          if($parts.Count -ne 12){ throw "Expected 12 source package parts; found $($parts.Count)." }
+          $b64 = ($parts | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
+          $sourceZip = Join-Path $env:RUNNER_TEMP 'source.zip'
+          [IO.File]::WriteAllBytes($sourceZip,[Convert]::FromBase64String($b64))
+          $hash=(Get-FileHash $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($hash -ne $env:SOURCE_PACKAGE_SHA256){ throw "Source package hash mismatch: $hash" }
+          $extract=Join-Path $env:RUNNER_TEMP 'source'; if(Test-Path $extract){Remove-Item $extract -Recurse -Force}; Expand-Archive $sourceZip $extract -Force
+          $site=Join-Path $extract 'SQL_AI_Agent'; if(-not (Test-Path (Join-Path $site 'Login.aspx'))){ throw 'Expected SQL_AI_Agent site folder is missing.' }
+          $deployZip=Join-Path $env:RUNNER_TEMP 'site.zip'; if(Test-Path $deployZip){Remove-Item $deployZip -Force}
+          Compress-Archive -Path (Join-Path $site '*') -DestinationPath $deployZip -Force
+          "DEPLOY_ZIP=$deployZip" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PACKAGE_HASH=$hash" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Deploy ZIP to Kudu
+      - name: Deploy to existing Azure App Service
         id: deploy
-        if: steps.oidc.outcome == 'success' || steps.bootstrap.outcome == 'success'
-        continue-on-error: true
         shell: pwsh
         run: |
-          $ErrorActionPreference='Stop';$t=Get-Content (Join-Path $env:RUNNER_TEMP 'arm-token.txt') -Raw
-          $kudu="https://${env:WEB_APP}.scm.azurewebsites.net/api/zip/site/wwwroot/"
-          $r=Invoke-WebRequest -Method Put -Uri $kudu -Headers @{Authorization="Bearer $t"} -ContentType 'application/zip' -InFile $env:DEPLOY_ZIP -SkipHttpErrorCheck -TimeoutSec 300
-          if([int]$r.StatusCode -lt 200 -or [int]$r.StatusCode -ge 300){throw "Kudu deploy failed HTTP $($r.StatusCode): $([string]$r.Content)"}
-          $restart="https://management.azure.com/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/${env:AZURE_RESOURCE_GROUP}/providers/Microsoft.Web/sites/${env:WEB_APP}/restart?api-version=2023-12-01"
-          $rr=Invoke-WebRequest -Method Post -Uri $restart -Headers @{Authorization="Bearer $t"} -SkipHttpErrorCheck
-          if([int]$rr.StatusCode -lt 200 -or [int]$rr.StatusCode -ge 300){throw "Restart failed HTTP $($rr.StatusCode): $([string]$rr.Content)"};'DEPLOYED=true'|Set-Content (Join-Path $env:RUNNER_TEMP 'deploy.txt')
+          $ErrorActionPreference='Stop'
+          az webapp start -g $env:AZURE_RESOURCE_GROUP -n $env:WEB_APP | Out-Null
+          az webapp deploy -g $env:AZURE_RESOURCE_GROUP -n $env:WEB_APP --src-path $env:DEPLOY_ZIP --type zip --clean true --restart true | Out-Null
+          if($LASTEXITCODE -ne 0){ throw 'Azure ZIP deployment failed.' }
+          az webapp restart -g $env:AZURE_RESOURCE_GROUP -n $env:WEB_APP | Out-Null
 
-      - name: Verify live login flow
+      - name: Verify live Entra-only application
         id: verify
-        if: steps.deploy.outcome == 'success'
-        continue-on-error: true
         shell: pwsh
         run: |
-          $ErrorActionPreference='Stop';Start-Sleep -Seconds 20;$s=New-Object Microsoft.PowerShell.Commands.WebRequestSession;$l=$null
-          for($i=1;$i -le 24;$i++){try{$l=Invoke-WebRequest $env:LOGIN_URL -WebSession $s -UseBasicParsing -TimeoutSec 30;if([int]$l.StatusCode -eq 200 -and $l.Content -match 'Continue Without Microsoft \(Temporary\)' -and $l.Content -match 'Azure App Service Easy Auth'){break}}catch{};Start-Sleep 5}
-          if($null -eq $l){throw 'Login page unavailable.'}
-          function H($n,$h){$m=[regex]::Match($h,'name="'+[regex]::Escape($n)+'"[^>]*value="([^"]*)"');if($m.Success){return [Net.WebUtility]::HtmlDecode($m.Groups[1].Value)};return ''}
-          $b=@{'__VIEWSTATE'=H '__VIEWSTATE' $l.Content;'__VIEWSTATEGENERATOR'=H '__VIEWSTATEGENERATOR' $l.Content;'__EVENTVALIDATION'=H '__EVENTVALIDATION' $l.Content;'btnTemporary'='Continue Without Microsoft (Temporary)'}
-          Invoke-WebRequest $env:LOGIN_URL -Method Post -Body $b -WebSession $s -UseBasicParsing -MaximumRedirection 5|Out-Null;$d=Invoke-WebRequest $env:DEFAULT_URL -WebSession $s -UseBasicParsing -MaximumRedirection 0
-          if([int]$d.StatusCode -ne 200 -or $d.Content -notmatch 'Babco SQL AI Agent'){throw 'Temporary login session failed.'}
-          $es=0;$loc='';try{$e=Invoke-WebRequest $env:EASY_AUTH_URL -UseBasicParsing -MaximumRedirection 0;$es=[int]$e.StatusCode;$loc=[string]$e.Headers.Location}catch{if($_.Exception.Response){$es=[int]$_.Exception.Response.StatusCode;try{$loc=[string]$_.Exception.Response.Headers.Location}catch{}}};if($es -lt 300 -or $es -ge 400){throw "Easy Auth HTTP $es"}
-          @('VERIFIED_LIVE=true','LOGIN_HTTP=200','TEMP_SESSION=true','DEFAULT_HTTP=200',"EASY_AUTH_HTTP=$es", "EASY_AUTH_LOCATION=$loc", "LOGIN_URL=$env:LOGIN_URL", "DEFAULT_URL=$env:DEFAULT_URL")|Set-Content (Join-Path $env:RUNNER_TEMP 'verify.txt')
+          $ErrorActionPreference='Stop'; Start-Sleep -Seconds 20
+          $login=$null
+          for($i=1;$i -le 24;$i++){
+            try{$login=Invoke-WebRequest $env:LOGIN_URL -UseBasicParsing -TimeoutSec 30;if([int]$login.StatusCode -eq 200 -and $login.Content -match 'Azure App Service Easy Auth'){break}}catch{}
+            Start-Sleep -Seconds 5
+          }
+          if($null -eq $login -or [int]$login.StatusCode -ne 200){throw 'Login.aspx is not healthy.'}
+          if($login.Content -match 'Local Test Admin Login' -or $login.Content -match 'Continue Without Microsoft' -or $login.Content -match 'LOCAL-ADMIN'){throw 'A local/temporary login bypass is still present.'}
+          if($login.Content -notmatch 'Sign in with Microsoft Entra ID'){throw 'Microsoft Entra sign-in button is missing.'}
 
-      - name: Publish status
+          $easy=0;$easyLocation=''
+          try{$r=Invoke-WebRequest $env:EASY_AUTH_URL -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30;$easy=[int]$r.StatusCode;$easyLocation=[string]$r.Headers.Location}catch{if($_.Exception.Response){$easy=[int]$_.Exception.Response.StatusCode;try{$easyLocation=[string]$_.Exception.Response.Headers.Location}catch{}}}
+          if($easy -lt 300 -or $easy -ge 400){throw "Easy Auth endpoint returned HTTP $easy instead of a Microsoft redirect."}
+
+          $defaultStatus=0;$defaultLocation=''
+          try{$d=Invoke-WebRequest $env:DEFAULT_URL -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30;$defaultStatus=[int]$d.StatusCode;$defaultLocation=[string]$d.Headers.Location}catch{if($_.Exception.Response){$defaultStatus=[int]$_.Exception.Response.StatusCode;try{$defaultLocation=[string]$_.Exception.Response.Headers.Location}catch{}}}
+          if($defaultStatus -lt 300 -or $defaultStatus -ge 400){throw "Unauthenticated Default.aspx should redirect to Login.aspx but returned HTTP $defaultStatus."}
+
+          "LOGIN_HTTP=200" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "LOCAL_ADMIN_REMOVED=true" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "EASY_AUTH_HTTP=$easy" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "DEFAULT_UNAUTH_HTTP=$defaultStatus" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "VERIFIED_LIVE=true" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Publish safe deployment status
         if: always()
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OIDC_RESULT: ${{ steps.oidc.outcome }}
-          BOOTSTRAP_RESULT: ${{ steps.bootstrap.outcome }}
           DEPLOY_RESULT: ${{ steps.deploy.outcome }}
           VERIFY_RESULT: ${{ steps.verify.outcome }}
         run: |
-          $d=Join-Path $env:RUNNER_TEMP 'status';New-Item -ItemType Directory -Path $d -Force|Out-Null;$x=@("SOURCE_COMMIT=$env:GITHUB_SHA","OIDC=$env:OIDC_RESULT","BOOTSTRAP=$env:BOOTSTRAP_RESULT","DEPLOY=$env:DEPLOY_RESULT","VERIFY=$env:VERIFY_RESULT");foreach($f in @('deploy.txt','verify.txt')){$p=Join-Path $env:RUNNER_TEMP $f;if(Test-Path $p){$x+=Get-Content $p}};$x+="CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))";$x|Set-Content (Join-Path $d 'status.txt')
-          Push-Location $d;git init|Out-Null;git checkout -b deployment-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish SQL Agent deployment status'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin deployment-status|Out-Null;Pop-Location
+          $d=Join-Path $env:RUNNER_TEMP 'status'; if(Test-Path $d){Remove-Item $d -Recurse -Force}; New-Item -ItemType Directory -Path $d -Force|Out-Null
+          @(
+            "SOURCE_COMMIT=$env:GITHUB_SHA",
+            "SOURCE_PACKAGE_SHA256=$env:PACKAGE_HASH",
+            "SQL_SETTING_PRESENT=$env:SQL_SETTING_PRESENT",
+            "OPENAI_SETTING_PRESENT=$env:OPENAI_SETTING_PRESENT",
+            "DEPLOY=$env:DEPLOY_RESULT",
+            "VERIFY=$env:VERIFY_RESULT",
+            "LOGIN_HTTP=$env:LOGIN_HTTP",
+            "LOCAL_ADMIN_REMOVED=$env:LOCAL_ADMIN_REMOVED",
+            "EASY_AUTH_HTTP=$env:EASY_AUTH_HTTP",
+            "DEFAULT_UNAUTH_HTTP=$env:DEFAULT_UNAUTH_HTTP",
+            "VERIFIED_LIVE=$env:VERIFIED_LIVE",
+            "LOGIN_URL=$env:LOGIN_URL",
+            "CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
+          ) | Set-Content (Join-Path $d 'status.txt') -Encoding ascii
+          Push-Location $d
+          git init | Out-Null; git checkout -b deployment-status | Out-Null
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt; git commit -m 'Publish SQL Agent deployment status' | Out-Null
+          git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git"
+          git push --force origin deployment-status | Out-Null
+          Pop-Location
 
       - name: Require verified live deployment
         if: always()
         shell: pwsh
         run: |
-          if('${{ steps.deploy.outcome }}' -ne 'success'){throw 'Deployment failed.'};if('${{ steps.verify.outcome }}' -ne 'success'){throw 'Verification failed.'}
+          if('${{ steps.deploy.outcome }}' -ne 'success'){throw 'Deployment failed.'}
+          if('${{ steps.verify.outcome }}' -ne 'success'){throw 'Live verification failed.'}

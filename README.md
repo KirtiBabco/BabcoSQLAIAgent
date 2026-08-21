@@ -1,20 +1,14 @@
 # Babco SQL AI Agent
 
-ASP.NET WebForms SQL AI Agent live application.
+Production deployment repository for the Babco SQL AI Agent WebForms application.
 
-## Live
+## Current authentication
+Microsoft Entra ID is handled by Azure App Service Easy Auth (`/.auth/login/aad`). The application has no local/temporary admin login bypass and does not require an Entra client secret in source.
 
-- Azure App Service: `babco-sqlagent-wf-2c606af4`
-- Live URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/
-- Login URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
-- Azure resource group: `rg-babco-rnd-sandbox`
-- Existing Windows App Service plan: `plan-resolvedesk-kirti20260810`
-- Database setting: `BAP_SUPPORT_CONNECTION_STRING`
-- Database connection binding: configured server-side in Azure
-- Admin allowlist: `kirti@babcofoods.com`, `ken@babcofoods.com`, `hemant@babcofoods.com`
+## Server-side configuration
+- `BAP_SUPPORT_CONNECTION_STRING` - global Babco SQL connection string (value never committed).
+- `OPENAI_API_KEY_DEVELOPMENT` - OpenAI API key (value never committed).
+- `AI_SQL_AGENT_ADMIN_EMAILS` - optional comma/semicolon-separated list controlling application Admin role after Entra sign-in.
 
-## Deployment pattern
-
-This repository follows the same deployment pattern as `KirtiBabco/BabcoUnloadCompare`: GitHub Actions, Azure OIDC, Windows App Service, direct ZIP deployment to `wwwroot`, restart, and HTTP health verification.
-
-Secrets and connection strings are never stored in browser code or committed to this repository.
+## Deployment source
+`source-package/part01.b64` through `part12.b64` form the full source archive. The deployment workflow verifies its SHA-256 before deploying to `babco-sqlagent-wf-2c606af4`.
