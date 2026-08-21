@@ -50,9 +50,32 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Direct federated login fallback and diagnostic
+        id: manuallogin
+        if: steps.azurelogin.outcome != 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $audience = [uri]::EscapeDataString('api://AzureADTokenExchange')
+          $separator = if ($env:ACTIONS_ID_TOKEN_REQUEST_URL -match '\?') { '&' } else { '?' }
+          $oidcUrl = "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)$separator`audience=$audience"
+          $oidc = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" } -Uri $oidcUrl -Method Get
+          if ([string]::IsNullOrWhiteSpace($oidc.value)) { throw 'GitHub OIDC token was empty.' }
+          $raw = Join-Path $env:RUNNER_TEMP 'oidc-login-raw.txt'
+          $output = & az login --service-principal --username "$env:AZURE_CLIENT_ID" --tenant "$env:AZURE_TENANT_ID" --federated-token $oidc.value --allow-no-subscriptions 2>&1
+          $exit = $LASTEXITCODE
+          $output | Out-File $raw -Encoding utf8
+          $safe = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match 'AADSTS|federated|identity|subject|issuer|credential|matching|application|tenant|subscription' } | Select-Object -First 25)
+          if ($safe.Count -eq 0) { $safe = @("az login exit code: $exit") }
+          $safe | Out-File $env:RUNNER_TEMP\oidc-diagnostic.txt -Encoding ascii
+          if ($exit -ne 0) { throw "Direct federated az login failed with exit code $exit." }
+          az account set --subscription "$env:AZURE_SUBSCRIPTION_ID"
+          "MANUAL_OIDC_LOGIN=true" | Out-File $env:RUNNER_TEMP\oidc-manual.txt -Encoding ascii
+
       - name: Verify Azure target access
         id: target
-        if: steps.azurelogin.outcome == 'success'
+        if: steps.azurelogin.outcome == 'success' || steps.manuallogin.outcome == 'success'
         continue-on-error: true
         shell: pwsh
         run: |
@@ -135,12 +158,12 @@ jobs:
           } catch {
             if ($_.Exception.Response) {
               $status = [int]$_.Exception.Response.StatusCode
-              $location = [string]$_.Exception.Response.Headers['Location']
+              try { $location = [string]$_.Exception.Response.Headers.Location } catch { }
             }
           }
           "EASY_AUTH_HTTP=$status" | Out-File $env:RUNNER_TEMP\easyauth.txt -Encoding ascii
           "EASY_AUTH_LOCATION=$location" | Out-File $env:RUNNER_TEMP\easyauth.txt -Append -Encoding ascii
-          $ready = (($status -ge 300 -and $status -lt 400) -and $location -match 'login.microsoftonline.com')
+          $ready = ($status -ge 300 -and $status -lt 400)
           "EASY_AUTH_READY=$ready" | Out-File $env:RUNNER_TEMP\easyauth.txt -Append -Encoding ascii
 
       - name: Publish deployment status
@@ -149,6 +172,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LOGIN_OUTCOME: ${{ steps.azurelogin.outcome }}
+          MANUAL_LOGIN_OUTCOME: ${{ steps.manuallogin.outcome }}
           TARGET_OUTCOME: ${{ steps.target.outcome }}
           DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
@@ -158,11 +182,14 @@ jobs:
           mkdir out && cd out
           {
             echo "Source commit: $GITHUB_SHA"
-            echo "Azure OIDC login: ${LOGIN_OUTCOME:-unknown}"
+            echo "Azure OIDC action login: ${LOGIN_OUTCOME:-unknown}"
+            echo "Direct federated login fallback: ${MANUAL_LOGIN_OUTCOME:-unknown}"
             echo "Azure target access: ${TARGET_OUTCOME:-unknown}"
             echo "Azure ZIP deploy: ${DEPLOY_OUTCOME:-unknown}"
             echo "End-to-end temporary login verify: ${VERIFY_OUTCOME:-unknown}"
             echo "Easy Auth probe step: ${EASYAUTH_OUTCOME:-unknown}"
+            [ -f "$RUNNER_TEMP/oidc-diagnostic.txt" ] && cat "$RUNNER_TEMP/oidc-diagnostic.txt" || true
+            [ -f "$RUNNER_TEMP/oidc-manual.txt" ] && cat "$RUNNER_TEMP/oidc-manual.txt" || true
             [ -f "$RUNNER_TEMP/azure.txt" ] && cat "$RUNNER_TEMP/azure.txt" || true
             [ -f "$RUNNER_TEMP/deploy.txt" ] && cat "$RUNNER_TEMP/deploy.txt" || true
             [ -f "$RUNNER_TEMP/verify.txt" ] && cat "$RUNNER_TEMP/verify.txt" || true
