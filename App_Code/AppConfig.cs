@@ -11,9 +11,11 @@ namespace SQL_AI_Agent
         {
             get
             {
-                string key = GetEnvironment("OPENAI_API_KEY");
+                string key = GetEnvironment("OPENAI_API_KEY_DEVELOPMENT");
                 if (string.IsNullOrWhiteSpace(key))
-                    throw new Exception("OPENAI_API_KEY is missing from server-side configuration.");
+                    key = GetEnvironment("OPENAI_API_KEY");
+                if (string.IsNullOrWhiteSpace(key))
+                    throw new Exception("OPENAI_API_KEY_DEVELOPMENT (or OPENAI_API_KEY) is missing from server-side configuration.");
                 return key.Trim();
             }
         }
