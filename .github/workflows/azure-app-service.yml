@@ -10,10 +10,14 @@ permissions:
   contents: write
 
 env:
+  AZURE_CLIENT_ID: 7a21e1b8-ee78-429e-8051-5dce354e3e1d
+  AZURE_TENANT_ID: 7e3bfe8e-acb5-4e0e-9798-c05331d2940c
+  AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
   AZURE_RESOURCE_GROUP: rg-babco-rnd-sandbox
   AZURE_WEBAPP_NAME: babco-sqlagent-wf-2c606af4
   LOGIN_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
   DEFAULT_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Default.aspx
+  EASY_AUTH_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad
 
 jobs:
   deploy-and-verify:
@@ -35,77 +39,62 @@ jobs:
             Copy-Item $_.FullName $stage -Recurse -Force
           }
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
-          if (-not (Test-Path $zip)) { throw 'Deployment ZIP was not created.' }
           "DEPLOY_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Check deployment credentials
-        id: creds
-        shell: bash
-        env:
-          HAS_CLIENT: ${{ secrets.AZURE_CLIENT_ID != '' }}
-          HAS_TENANT: ${{ secrets.AZURE_TENANT_ID != '' }}
-          HAS_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}
-          HAS_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE != '' }}
-        run: |
-          echo "client=$HAS_CLIENT" >> "$GITHUB_OUTPUT"
-          echo "tenant=$HAS_TENANT" >> "$GITHUB_OUTPUT"
-          echo "subscription=$HAS_SUBSCRIPTION" >> "$GITHUB_OUTPUT"
-          echo "publish_profile=$HAS_PUBLISH_PROFILE" >> "$GITHUB_OUTPUT"
-
-      - name: Azure login with OIDC
+      - name: Azure login with existing OIDC identity
         id: azurelogin
-        if: steps.creds.outputs.client == 'true' && steps.creds.outputs.tenant == 'true' && steps.creds.outputs.subscription == 'true'
         continue-on-error: true
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Deploy with Azure OIDC token
-        id: oidcdeploy
+      - name: Verify Azure target access
+        id: target
         if: steps.azurelogin.outcome == 'success'
         continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          az webapp config appsettings set -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" --settings SCM_DO_BUILD_DURING_DEPLOYMENT=false | Out-Null
-          az webapp start -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" | Out-Null
-          $token = az account get-access-token --query accessToken -o tsv
-          if ([string]::IsNullOrWhiteSpace($token)) { throw 'Azure access token was empty.' }
-          $headers = @{ Authorization = "Bearer $token" }
-          $scm = "https://$($env:AZURE_WEBAPP_NAME).scm.azurewebsites.net/api/zip/site/wwwroot/"
-          Invoke-WebRequest -Uri $scm -Method Put -Headers $headers -ContentType 'application/zip' -InFile $env:DEPLOY_ZIP -UseBasicParsing | Out-Null
-          az webapp restart -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" | Out-Null
+          $app = az webapp show -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" | ConvertFrom-Json
+          if (-not $app.id) { throw 'Target App Service not found or inaccessible.' }
+          "TARGET_ACCESS=true" | Out-File $env:RUNNER_TEMP\azure.txt -Encoding ascii
+          "TARGET_HOST=$($app.defaultHostName)" | Out-File $env:RUNNER_TEMP\azure.txt -Append -Encoding ascii
 
-      - name: Deploy with publish profile fallback
-        id: profiledeploy
-        if: steps.oidcdeploy.outcome != 'success' && steps.creds.outputs.publish_profile == 'true'
-        continue-on-error: true
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: ${{ env.DEPLOY_ZIP }}
-
-      - name: Verify live temporary login end-to-end
-        id: verify
+      - name: Deploy current main ZIP to App Service
+        id: deploy
+        if: steps.target.outcome == 'success'
         continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Start-Sleep -Seconds 12
+          az webapp start -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" | Out-Null
+          az webapp config appsettings set -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" --settings SCM_DO_BUILD_DURING_DEPLOYMENT=false WEBSITE_RUN_FROM_PACKAGE=0 | Out-Null
+          az webapp deploy -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" --src-path "$env:DEPLOY_ZIP" --type zip --clean true --restart true | Out-Null
+          az webapp restart -g "$env:AZURE_RESOURCE_GROUP" -n "$env:AZURE_WEBAPP_NAME" | Out-Null
+          "DEPLOYED=true" | Out-File $env:RUNNER_TEMP\deploy.txt -Encoding ascii
+
+      - name: Verify live temporary login end-to-end
+        id: verify
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Start-Sleep -Seconds 20
           $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
           $login = $null
-          for ($i=1; $i -le 20; $i++) {
+          for ($i=1; $i -le 24; $i++) {
             try {
               $login = Invoke-WebRequest -Uri $env:LOGIN_URL -WebSession $session -UseBasicParsing -TimeoutSec 30
-              if ([int]$login.StatusCode -eq 200) { break }
+              if ([int]$login.StatusCode -eq 200 -and $login.Content -match 'Continue Without Microsoft \(Temporary\)') { break }
             } catch { }
             Start-Sleep -Seconds 5
           }
           if ($null -eq $login -or [int]$login.StatusCode -ne 200) { throw 'Login.aspx did not return HTTP 200.' }
-          if ($login.Content -notmatch 'Continue Without Microsoft \(Temporary\)') { throw 'Temporary login button is not present on live Login.aspx.' }
+          if ($login.Content -notmatch 'Continue Without Microsoft \(Temporary\)') { throw 'Temporary login button is missing.' }
+          if ($login.Content -notmatch 'Azure App Service Easy Auth') { throw 'New Easy Auth source marker is missing from live Login.aspx.' }
 
           function Hidden([string]$name, [string]$html) {
             $pattern = 'name="' + [regex]::Escape($name) + '"[^>]*value="([^"]*)"'
@@ -120,43 +109,66 @@ jobs:
             '__EVENTVALIDATION' = Hidden '__EVENTVALIDATION' $login.Content
             'btnTemporary' = 'Continue Without Microsoft (Temporary)'
           }
-          $post = Invoke-WebRequest -Uri $env:LOGIN_URL -Method Post -Body $body -WebSession $session -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 30
+          Invoke-WebRequest -Uri $env:LOGIN_URL -Method Post -Body $body -WebSession $session -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 30 | Out-Null
           $default = Invoke-WebRequest -Uri $env:DEFAULT_URL -WebSession $session -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30
           if ([int]$default.StatusCode -ne 200) { throw "Default.aspx returned HTTP $($default.StatusCode)." }
-          if ($default.BaseResponse.ResponseUri.AbsolutePath -match 'Login.aspx') { throw 'Default.aspx redirected back to Login.aspx after temporary login.' }
           if ($default.Content -notmatch 'Babco SQL AI Agent') { throw 'Default.aspx content marker is missing.' }
           "LOGIN_HTTP=200" | Out-File $env:RUNNER_TEMP\verify.txt -Encoding ascii
+          "NEW_SOURCE_LIVE=true" | Out-File $env:RUNNER_TEMP\verify.txt -Append -Encoding ascii
           "TEMP_BUTTON=true" | Out-File $env:RUNNER_TEMP\verify.txt -Append -Encoding ascii
           "TEMP_SESSION=true" | Out-File $env:RUNNER_TEMP\verify.txt -Append -Encoding ascii
           "DEFAULT_HTTP=200" | Out-File $env:RUNNER_TEMP\verify.txt -Append -Encoding ascii
+
+      - name: Probe App Service Easy Auth
+        id: easyauth
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $status = 0
+          $location = ''
+          try {
+            $r = Invoke-WebRequest -Uri $env:EASY_AUTH_URL -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30
+            $status = [int]$r.StatusCode
+            $location = [string]$r.Headers.Location
+          } catch {
+            if ($_.Exception.Response) {
+              $status = [int]$_.Exception.Response.StatusCode
+              $location = [string]$_.Exception.Response.Headers['Location']
+            }
+          }
+          "EASY_AUTH_HTTP=$status" | Out-File $env:RUNNER_TEMP\easyauth.txt -Encoding ascii
+          "EASY_AUTH_LOCATION=$location" | Out-File $env:RUNNER_TEMP\easyauth.txt -Append -Encoding ascii
+          $ready = (($status -ge 300 -and $status -lt 400) -and $location -match 'login.microsoftonline.com')
+          "EASY_AUTH_READY=$ready" | Out-File $env:RUNNER_TEMP\easyauth.txt -Append -Encoding ascii
 
       - name: Publish deployment status
         if: always()
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OIDC_LOGIN: ${{ steps.azurelogin.outcome }}
-          OIDC_DEPLOY: ${{ steps.oidcdeploy.outcome }}
-          PROFILE_DEPLOY: ${{ steps.profiledeploy.outcome }}
-          VERIFY: ${{ steps.verify.outcome }}
-          CLIENT_PRESENT: ${{ steps.creds.outputs.client }}
-          TENANT_PRESENT: ${{ steps.creds.outputs.tenant }}
-          SUBSCRIPTION_PRESENT: ${{ steps.creds.outputs.subscription }}
-          PROFILE_PRESENT: ${{ steps.creds.outputs.publish_profile }}
+          LOGIN_OUTCOME: ${{ steps.azurelogin.outcome }}
+          TARGET_OUTCOME: ${{ steps.target.outcome }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          EASYAUTH_OUTCOME: ${{ steps.easyauth.outcome }}
         run: |
           set -euo pipefail
           mkdir out && cd out
           {
             echo "Source commit: $GITHUB_SHA"
-            echo "AZURE_CLIENT_ID present: ${CLIENT_PRESENT:-unknown}"
-            echo "AZURE_TENANT_ID present: ${TENANT_PRESENT:-unknown}"
-            echo "AZURE_SUBSCRIPTION_ID present: ${SUBSCRIPTION_PRESENT:-unknown}"
-            echo "AZURE_WEBAPP_PUBLISH_PROFILE present: ${PROFILE_PRESENT:-unknown}"
-            echo "OIDC login: ${OIDC_LOGIN:-skipped}"
-            echo "OIDC deploy: ${OIDC_DEPLOY:-skipped}"
-            echo "Publish profile deploy: ${PROFILE_DEPLOY:-skipped}"
-            echo "End-to-end temporary login verify: ${VERIFY:-unknown}"
-            if [ -f "$RUNNER_TEMP/verify.txt" ]; then cat "$RUNNER_TEMP/verify.txt"; fi
+            echo "Azure OIDC login: ${LOGIN_OUTCOME:-unknown}"
+            echo "Azure target access: ${TARGET_OUTCOME:-unknown}"
+            echo "Azure ZIP deploy: ${DEPLOY_OUTCOME:-unknown}"
+            echo "End-to-end temporary login verify: ${VERIFY_OUTCOME:-unknown}"
+            echo "Easy Auth probe step: ${EASYAUTH_OUTCOME:-unknown}"
+            [ -f "$RUNNER_TEMP/azure.txt" ] && cat "$RUNNER_TEMP/azure.txt" || true
+            [ -f "$RUNNER_TEMP/deploy.txt" ] && cat "$RUNNER_TEMP/deploy.txt" || true
+            [ -f "$RUNNER_TEMP/verify.txt" ] && cat "$RUNNER_TEMP/verify.txt" || true
+            [ -f "$RUNNER_TEMP/easyauth.txt" ] && cat "$RUNNER_TEMP/easyauth.txt" || true
+            echo "LOGIN_URL=$LOGIN_URL"
+            echo "DEFAULT_URL=$DEFAULT_URL"
             echo "Checked: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > status.txt
           git init
@@ -168,8 +180,9 @@ jobs:
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin deployment-status
 
-      - name: Fail when deployment or verification failed
+      - name: Fail when live deployment verification failed
         if: always()
         shell: pwsh
         run: |
+          if ('${{ steps.deploy.outcome }}' -ne 'success') { throw 'Azure deployment failed.' }
           if ('${{ steps.verify.outcome }}' -ne 'success') { throw 'Live temporary-login verification failed.' }
