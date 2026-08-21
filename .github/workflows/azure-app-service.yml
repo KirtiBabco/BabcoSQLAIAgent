@@ -22,11 +22,11 @@ env:
 jobs:
   deploy:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reconstruct and validate source package
+      - name: Reconstruct full source and apply production overrides
         id: package
         continue-on-error: true
         shell: pwsh
@@ -36,26 +36,48 @@ jobs:
             $parts = Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE 'source-package') -Filter 'part*.b64' | Sort-Object Name
             "PACKAGE_PARTS=$($parts.Count)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
             if($parts.Count -lt 1){ throw 'No source package parts found.' }
+
             $b64 = ($parts | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
             $sourceZip = Join-Path $env:RUNNER_TEMP 'source.zip'
             [IO.File]::WriteAllBytes($sourceZip,[Convert]::FromBase64String($b64))
             $hash=(Get-FileHash $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant()
             "PACKAGE_HASH=$hash" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
             $extract=Join-Path $env:RUNNER_TEMP 'source'
             if(Test-Path $extract){Remove-Item $extract -Recurse -Force}
             Expand-Archive $sourceZip $extract -Force
             $site=Join-Path $extract 'SQL_AI_Agent'
-            foreach($name in @('Login.aspx','Login.aspx.cs','Default.aspx','Default.aspx.cs','Web.config','App_Code\AppConfig.cs','App_Code\AuthService.cs','App_Code\SqlTool.cs')){
+            if(-not (Test-Path $site)){throw 'SQL_AI_Agent source folder is missing.'}
+
+            $overrides=Join-Path $env:GITHUB_WORKSPACE 'deploy-overrides'
+            if(-not (Test-Path $overrides)){throw 'deploy-overrides folder is missing.'}
+            Get-ChildItem $overrides -Recurse -File | ForEach-Object {
+              $relative=$_.FullName.Substring($overrides.Length).TrimStart([char[]]@('\','/'))
+              $destination=Join-Path $site $relative
+              $parent=Split-Path $destination -Parent
+              if(-not (Test-Path $parent)){New-Item -ItemType Directory -Path $parent -Force|Out-Null}
+              Copy-Item $_.FullName $destination -Force
+            }
+            "OVERRIDES_APPLIED=true" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+            foreach($name in @('Login.aspx','Login.aspx.cs','Default.aspx','Default.aspx.cs','Web.config','AuthComplete.aspx.cs','Logout.aspx.cs','App_Code\AppConfig.cs','App_Code\AuthService.cs','App_Code\SqlTool.cs','App_Code\AgentService.cs','App_Code\TelemetryStore.cs')){
               if(-not (Test-Path (Join-Path $site $name))){throw "Missing runtime source file: $name"}
             }
+
             $login=Get-Content (Join-Path $site 'Login.aspx') -Raw
+            $loginCode=Get-Content (Join-Path $site 'Login.aspx.cs') -Raw
             $auth=Get-Content (Join-Path $site 'App_Code\AuthService.cs') -Raw
             $cfg=Get-Content (Join-Path $site 'App_Code\AppConfig.cs') -Raw
             $web=Get-Content (Join-Path $site 'Web.config') -Raw
-            if($login -match 'Local Test Admin Login|Continue Without Microsoft|btnLocalTest'){throw 'Local or temporary login bypass is still present in source.'}
-            if(($auth + $web + $cfg) -match 'ENTRA_CLIENT_SECRET|EntraClientSecret'){throw 'Custom Entra client-secret logic is still present.'}
+            $runtime=$login+$loginCode+$auth+$cfg+$web
+
+            if($runtime -match 'Local Test Admin Login|Continue Without Microsoft|btnLocalTest|LOCAL-ADMIN|LocalTestAdminLogin|CanUseLocalTestLogin'){throw 'Local/temporary login bypass is still present in runtime source.'}
+            if($runtime -match 'ENTRA_CLIENT_SECRET|EntraClientSecret'){throw 'Custom Entra client-secret logic is still present in runtime source.'}
             if($auth -notmatch '/\.auth/login/aad'){throw 'Azure App Service Easy Auth login endpoint is missing.'}
-            if($cfg -notmatch 'BAP_SUPPORT_CONNECTION_STRING'){throw 'Global Babco SQL setting BAP_SUPPORT_CONNECTION_STRING is missing.'}
+            if($login -notmatch 'Sign in with Microsoft Entra ID'){throw 'Microsoft Entra login button is missing.'}
+            if($cfg -notmatch 'BAP_SUPPORT_CONNECTION_STRING'){throw 'Global Babco SQL environment setting is missing from AppConfig.'}
+            if($cfg -match 'Password\s*=|User Id\s*=|Server=tcp:'){throw 'A SQL connection value appears to be embedded in AppConfig.'}
+
             $deployZip=Join-Path $env:RUNNER_TEMP 'site.zip'
             if(Test-Path $deployZip){Remove-Item $deployZip -Force}
             Compress-Archive -Path (Join-Path $site '*') -DestinationPath $deployZip -Force
@@ -115,17 +137,24 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          $ErrorActionPreference='Stop';Start-Sleep -Seconds 20
+          $ErrorActionPreference='Stop'
+          Start-Sleep -Seconds 20
           $login=$null
-          for($i=1;$i -le 24;$i++){try{$login=Invoke-WebRequest $env:LOGIN_URL -UseBasicParsing -TimeoutSec 30;if([int]$login.StatusCode -eq 200 -and $login.Content -match 'Sign in with Microsoft Entra ID'){break}}catch{};Start-Sleep 5}
+          for($i=1;$i -le 24;$i++){
+            try{$login=Invoke-WebRequest $env:LOGIN_URL -UseBasicParsing -TimeoutSec 30;if([int]$login.StatusCode -eq 200 -and $login.Content -match 'Sign in with Microsoft Entra ID'){break}}catch{}
+            Start-Sleep -Seconds 5
+          }
           if($null -eq $login -or [int]$login.StatusCode -ne 200){throw 'Login.aspx is not healthy.'}
           if($login.Content -match 'Local Test Admin Login|Continue Without Microsoft|LOCAL-ADMIN'){throw 'Local/temporary login bypass is live.'}
+
           $easy=0
           try{$r=Invoke-WebRequest $env:EASY_AUTH_URL -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30;$easy=[int]$r.StatusCode}catch{if($_.Exception.Response){$easy=[int]$_.Exception.Response.StatusCode}}
-          if($easy -lt 300 -or $easy -ge 400){throw "Easy Auth returned HTTP $easy instead of redirect."}
+          if($easy -lt 300 -or $easy -ge 400){throw "Easy Auth returned HTTP $easy instead of a Microsoft redirect."}
+
           $defaultStatus=0
           try{$d=Invoke-WebRequest $env:DEFAULT_URL -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30;$defaultStatus=[int]$d.StatusCode}catch{if($_.Exception.Response){$defaultStatus=[int]$_.Exception.Response.StatusCode}}
           if($defaultStatus -lt 300 -or $defaultStatus -ge 400){throw "Unauthenticated Default.aspx returned HTTP $defaultStatus instead of redirect."}
+
           "LOGIN_HTTP=200"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "LOCAL_ADMIN_REMOVED=true"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "EASY_AUTH_HTTP=$easy"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
@@ -143,12 +172,20 @@ jobs:
           DEPLOY_RESULT: ${{ steps.deploy.outcome }}
           VERIFY_RESULT: ${{ steps.verify.outcome }}
         run: |
-          $d=Join-Path $env:RUNNER_TEMP 'status';if(Test-Path $d){Remove-Item $d -Recurse -Force};New-Item -ItemType Directory -Path $d -Force|Out-Null
+          $d=Join-Path $env:RUNNER_TEMP 'status'
+          if(Test-Path $d){Remove-Item $d -Recurse -Force}
+          New-Item -ItemType Directory -Path $d -Force|Out-Null
           @(
-            "SOURCE_COMMIT=$env:GITHUB_SHA","PACKAGE=$env:PACKAGE_RESULT","PACKAGE_VALID=$env:PACKAGE_VALID","PACKAGE_PARTS=$env:PACKAGE_PARTS","PACKAGE_SHA256=$env:PACKAGE_HASH","PACKAGE_ERROR=$env:PACKAGE_ERROR",
+            "SOURCE_COMMIT=$env:GITHUB_SHA","PACKAGE=$env:PACKAGE_RESULT","PACKAGE_VALID=$env:PACKAGE_VALID","PACKAGE_PARTS=$env:PACKAGE_PARTS","PACKAGE_SHA256=$env:PACKAGE_HASH","PACKAGE_ERROR=$env:PACKAGE_ERROR","OVERRIDES_APPLIED=$env:OVERRIDES_APPLIED",
             "SOURCE_LOCAL_ADMIN_REMOVED=$env:SOURCE_LOCAL_ADMIN_REMOVED","SOURCE_EASY_AUTH=$env:SOURCE_EASY_AUTH","SOURCE_GLOBAL_SQL=$env:SOURCE_GLOBAL_SQL","OIDC=$env:OIDC_RESULT","SETTINGS=$env:SETTINGS_RESULT","SQL_SETTING_PRESENT=$env:SQL_SETTING_PRESENT","OPENAI_SETTING_PRESENT=$env:OPENAI_SETTING_PRESENT","DEPLOY=$env:DEPLOY_RESULT","VERIFY=$env:VERIFY_RESULT","LOGIN_HTTP=$env:LOGIN_HTTP","LOCAL_ADMIN_REMOVED=$env:LOCAL_ADMIN_REMOVED","EASY_AUTH_HTTP=$env:EASY_AUTH_HTTP","DEFAULT_UNAUTH_HTTP=$env:DEFAULT_UNAUTH_HTTP","VERIFIED_LIVE=$env:VERIFIED_LIVE","LOGIN_URL=$env:LOGIN_URL","CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
           )|Set-Content (Join-Path $d 'status.txt') -Encoding ascii
-          Push-Location $d;git init|Out-Null;git checkout -b deployment-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish SQL Agent deployment status'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin deployment-status|Out-Null;Pop-Location
+          Push-Location $d
+          git init|Out-Null;git checkout -b deployment-status|Out-Null
+          git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt;git commit -m 'Publish SQL Agent deployment status'|Out-Null
+          git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git"
+          git push --force origin deployment-status|Out-Null
+          Pop-Location
 
       - name: Require verified deployment
         if: always()
