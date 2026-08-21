@@ -1,0 +1,8 @@
+SOURCE_COMMIT=33d2951e5f293f83495051f58ac34f657cb3549f
+OIDC=success
+BOOTSTRAP=skipped
+DEPLOY=success
+VERIFY=failure
+DEPLOYED=true
+TARGET_HOST=babco-sqlagent-wf-2c606af4.azurewebsites.net
+CHECKED_UTC=2026-08-21T07:29:24.5117263Z
