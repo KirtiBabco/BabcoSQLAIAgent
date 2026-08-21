@@ -1,0 +1,1 @@
+Verified production deployment request for Entra Easy Auth + global Babco SQL configuration.
