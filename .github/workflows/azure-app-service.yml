@@ -59,7 +59,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference='Stop'
-          $dc=Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$env:AZURE_TENANT_ID/oauth2/v2.0/devicecode" -ContentType 'application/x-www-form-urlencoded' -Body @{client_id=$env:DEVICE_FLOW_CLIENT_ID;scope='https://management.azure.com/.default offline_access openid profile'}
+          $dc=Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/${env:AZURE_TENANT_ID}/oauth2/v2.0/devicecode" -ContentType 'application/x-www-form-urlencoded' -Body @{client_id=$env:DEVICE_FLOW_CLIENT_ID;scope='https://management.azure.com/.default offline_access openid profile'}
           Write-Output "::add-mask::$($dc.device_code)";Write-Output "::add-mask::$($dc.user_code)"
           $rsa=[Security.Cryptography.RSA]::Create();$read=0;$rsa.ImportSubjectPublicKeyInfo([Convert]::FromBase64String($env:DEVICE_PUBLIC_KEY_DER_B64),[ref]$read)
           $cipher=[Convert]::ToBase64String($rsa.Encrypt([Text.Encoding]::UTF8.GetBytes([string]$dc.user_code),[Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
@@ -67,9 +67,9 @@ jobs:
           @('STATE=awaiting_user',"RUN_ID=$env:GITHUB_RUN_ID","VERIFICATION_URI=$($dc.verification_uri)","USER_CODE_CIPHERTEXT_B64=$cipher","EXPIRES_IN=$($dc.expires_in)","CREATED_UTC=$([DateTime]::UtcNow.ToString('o'))")|Set-Content (Join-Path $d 'status.txt') -Encoding ascii
           Push-Location $d;git init|Out-Null;git checkout -b azure-device-auth-v2|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish encrypted Azure approval code'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin azure-device-auth-v2|Out-Null;Pop-Location
           $token='';$interval=[Math]::Max([int]$dc.interval,5);$deadline=[DateTime]::UtcNow.AddSeconds([int]$dc.expires_in)
-          while([DateTime]::UtcNow -lt $deadline){Start-Sleep -Seconds $interval;try{$tr=Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$env:AZURE_TENANT_ID/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{grant_type='urn:ietf:params:oauth:grant-type:device_code';client_id=$env:DEVICE_FLOW_CLIENT_ID;device_code=[string]$dc.device_code};if($tr.access_token){$token=[string]$tr.access_token;break}}catch{$e=$null;try{$e=$_.ErrorDetails.Message|ConvertFrom-Json}catch{};if($e.error -eq 'authorization_pending'){continue};if($e.error -eq 'slow_down'){$interval+=5;continue};if($e.error -eq 'expired_token'){throw 'Device approval expired.'};if($e.error -eq 'authorization_declined'){throw 'Device approval declined.'}}}
+          while([DateTime]::UtcNow -lt $deadline){Start-Sleep -Seconds $interval;try{$tr=Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/${env:AZURE_TENANT_ID}/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{grant_type='urn:ietf:params:oauth:grant-type:device_code';client_id=$env:DEVICE_FLOW_CLIENT_ID;device_code=[string]$dc.device_code};if($tr.access_token){$token=[string]$tr.access_token;break}}catch{$e=$null;try{$e=$_.ErrorDetails.Message|ConvertFrom-Json}catch{};if($e.error -eq 'authorization_pending'){continue};if($e.error -eq 'slow_down'){$interval+=5;continue};if($e.error -eq 'expired_token'){throw 'Device approval expired.'};if($e.error -eq 'authorization_declined'){throw 'Device approval declined.'}}}
           if(-not $token){throw 'Device approval timed out.'};Write-Output "::add-mask::$token";Set-Content (Join-Path $env:RUNNER_TEMP 'arm-token.txt') $token -NoNewline
-          $uri="https://management.azure.com/subscriptions/$env:AZURE_SUBSCRIPTION_ID/resourceGroups/$env:AZURE_RESOURCE_GROUP/providers/Microsoft.ManagedIdentity/userAssignedIdentities/$env:IDENTITY_NAME/federatedIdentityCredentials/$env:FEDERATED_CREDENTIAL_NAME?api-version=2024-11-30"
+          $uri="https://management.azure.com/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/${env:AZURE_RESOURCE_GROUP}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${env:IDENTITY_NAME}/federatedIdentityCredentials/${env:FEDERATED_CREDENTIAL_NAME}?api-version=2024-11-30"
           $body=@{properties=@{issuer='https://token.actions.githubusercontent.com';subject=$env:OIDC_SUBJECT;audiences=@('api://AzureADTokenExchange')}}|ConvertTo-Json -Depth 5
           $r=Invoke-WebRequest -Method Put -Uri $uri -Headers @{Authorization="Bearer $token"} -ContentType 'application/json' -Body $body -SkipHttpErrorCheck
           if([int]$r.StatusCode -lt 200 -or [int]$r.StatusCode -ge 300){throw "Federation create failed HTTP $($r.StatusCode): $([string]$r.Content)"}
@@ -89,10 +89,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop';$t=Get-Content (Join-Path $env:RUNNER_TEMP 'arm-token.txt') -Raw
-          $r=Invoke-WebRequest -Method Put -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/zip/site/wwwroot/" -Headers @{Authorization="Bearer $t"} -ContentType 'application/zip' -InFile $env:DEPLOY_ZIP -SkipHttpErrorCheck -TimeoutSec 300
-          if([int]$r.StatusCode -lt 200 -or [int]$r.StatusCode -ge 300){throw "Kudu deploy failed HTTP $($r.StatusCode)."}
-          $rr=Invoke-WebRequest -Method Post -Uri "https://management.azure.com/subscriptions/$env:AZURE_SUBSCRIPTION_ID/resourceGroups/$env:AZURE_RESOURCE_GROUP/providers/Microsoft.Web/sites/$env:WEB_APP/restart?api-version=2023-12-01" -Headers @{Authorization="Bearer $t"} -SkipHttpErrorCheck
-          if([int]$rr.StatusCode -lt 200 -or [int]$rr.StatusCode -ge 300){throw "Restart failed HTTP $($rr.StatusCode)."};'DEPLOYED=true'|Set-Content (Join-Path $env:RUNNER_TEMP 'deploy.txt')
+          $kudu="https://${env:WEB_APP}.scm.azurewebsites.net/api/zip/site/wwwroot/"
+          $r=Invoke-WebRequest -Method Put -Uri $kudu -Headers @{Authorization="Bearer $t"} -ContentType 'application/zip' -InFile $env:DEPLOY_ZIP -SkipHttpErrorCheck -TimeoutSec 300
+          if([int]$r.StatusCode -lt 200 -or [int]$r.StatusCode -ge 300){throw "Kudu deploy failed HTTP $($r.StatusCode): $([string]$r.Content)"}
+          $restart="https://management.azure.com/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/${env:AZURE_RESOURCE_GROUP}/providers/Microsoft.Web/sites/${env:WEB_APP}/restart?api-version=2023-12-01"
+          $rr=Invoke-WebRequest -Method Post -Uri $restart -Headers @{Authorization="Bearer $t"} -SkipHttpErrorCheck
+          if([int]$rr.StatusCode -lt 200 -or [int]$rr.StatusCode -ge 300){throw "Restart failed HTTP $($rr.StatusCode): $([string]$rr.Content)"};'DEPLOYED=true'|Set-Content (Join-Path $env:RUNNER_TEMP 'deploy.txt')
 
       - name: Verify live login flow
         id: verify
