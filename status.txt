@@ -1,0 +1,10 @@
+VERIFIED_LIVE=true
+LOGIN_HTTP=200
+TEMP_BUTTON=true
+TEMP_SESSION=true
+DEFAULT_HTTP=200
+EASY_AUTH_HTTP=302
+EASY_AUTH_LOCATION=https://login.windows.net/7e3bfe8e-acb5-4e0e-9798-c05331d2940c/oauth2/v2.0/authorize?response_type=code+id_token&redirect_uri=https%3A%2F%2Fbabco-sqlagent-wf-2c606af4.azurewebsites.net%2F.auth%2Flogin%2Faad%2Fcallback&client_id=0a49493a-7199-490d-9416-59ea6199861f&scope=openid+profile+email&response_mode=form_post&nonce=5b7e90eae3a94f058335472e5f886d71_20260821073238&state=redir%3D
+LOGIN_URL=https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
+DEFAULT_URL=https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Default.aspx
+CHECKED_UTC=2026-08-21T07:27:38.7400753Z
