@@ -49,6 +49,7 @@ jobs:
           client-id: ${{ env.AZURE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
 
       - name: Direct federated login fallback and diagnostic
         id: manuallogin
@@ -59,14 +60,25 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $audience = [uri]::EscapeDataString('api://AzureADTokenExchange')
           $separator = if ($env:ACTIONS_ID_TOKEN_REQUEST_URL -match '\?') { '&' } else { '?' }
-          $oidcUrl = "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)$separator`audience=$audience"
+          $oidcUrl = "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)$separator" + "audience=$audience"
           $oidc = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" } -Uri $oidcUrl -Method Get
           if ([string]::IsNullOrWhiteSpace($oidc.value)) { throw 'GitHub OIDC token was empty.' }
-          $raw = Join-Path $env:RUNNER_TEMP 'oidc-login-raw.txt'
+
+          function Decode-Base64Url([string]$value) {
+            $s = $value.Replace('-', '+').Replace('_', '/')
+            switch ($s.Length % 4) { 2 { $s += '==' } 3 { $s += '=' } }
+            return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s))
+          }
+          $claims = (Decode-Base64Url ($oidc.value.Split('.')[1])) | ConvertFrom-Json
+          @(
+            "OIDC_ISS=$($claims.iss)",
+            "OIDC_SUB=$($claims.sub)",
+            "OIDC_AUD=$($claims.aud)"
+          ) | Out-File $env:RUNNER_TEMP\oidc-claims.txt -Encoding ascii
+
           $output = & az login --service-principal --username "$env:AZURE_CLIENT_ID" --tenant "$env:AZURE_TENANT_ID" --federated-token $oidc.value --allow-no-subscriptions 2>&1
           $exit = $LASTEXITCODE
-          $output | Out-File $raw -Encoding utf8
-          $safe = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match 'AADSTS|federated|identity|subject|issuer|credential|matching|application|tenant|subscription' } | Select-Object -First 25)
+          $safe = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match 'AADSTS|federated|identity|subject|issuer|credential|matching|application|tenant|subscription|audience' } | Select-Object -First 25)
           if ($safe.Count -eq 0) { $safe = @("az login exit code: $exit") }
           $safe | Out-File $env:RUNNER_TEMP\oidc-diagnostic.txt -Encoding ascii
           if ($exit -ne 0) { throw "Direct federated az login failed with exit code $exit." }
@@ -188,6 +200,7 @@ jobs:
             echo "Azure ZIP deploy: ${DEPLOY_OUTCOME:-unknown}"
             echo "End-to-end temporary login verify: ${VERIFY_OUTCOME:-unknown}"
             echo "Easy Auth probe step: ${EASYAUTH_OUTCOME:-unknown}"
+            [ -f "$RUNNER_TEMP/oidc-claims.txt" ] && cat "$RUNNER_TEMP/oidc-claims.txt" || true
             [ -f "$RUNNER_TEMP/oidc-diagnostic.txt" ] && cat "$RUNNER_TEMP/oidc-diagnostic.txt" || true
             [ -f "$RUNNER_TEMP/oidc-manual.txt" ] && cat "$RUNNER_TEMP/oidc-manual.txt" || true
             [ -f "$RUNNER_TEMP/azure.txt" ] && cat "$RUNNER_TEMP/azure.txt" || true
