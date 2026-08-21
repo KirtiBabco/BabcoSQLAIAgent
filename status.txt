@@ -1,0 +1,8 @@
+SOURCE_COMMIT=8bef1fb8ce8febe5f5b7bfb4f45d2d0ea3ef1910
+INITIAL_OIDC=failure
+BOOTSTRAP=failure
+DEPLOY=skipped
+VERIFY=skipped
+LOGIN_URL=https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
+DEFAULT_URL=https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Default.aspx
+CHECKED_UTC=2026-08-21T06:12:59.8133545Z
