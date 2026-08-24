@@ -20,6 +20,7 @@ env:
   KVSF_IDENTITY_RG: 'rg-kv-software-factory-dev'
   KVSF_IDENTITY_NAME: 'id-kvsf-github-dev'
   TARGET_RG: 'rg-babco-rnd-sandbox'
+  WEB_APP: 'babco-sqlagent-wf-2c606af4'
   CREDENTIAL_NAME: 'github-kirtibabco-babcosqlaiagent-main'
 
 jobs:
@@ -34,7 +35,7 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Configure existing KVSF identity where authorized
+      - name: Configure identity and inventory permanent SQL network paths
         id: bootstrap
         shell: bash
         run: |
@@ -87,6 +88,22 @@ jobs:
               echo "TARGET_RG_CONTRIBUTOR_ERROR=$msg" >> "$status_file"
             fi
           fi
+
+          sql_servers=$(az sql server list --query "[].{rg:resourceGroup,name:name,fqdn:fullyQualifiedDomainName,public:publicNetworkAccess}" -o tsv 2>/dev/null | tr '\n' '|' | cut -c1-3000)
+          echo "AZURE_SQL_SERVERS=$sql_servers" >> "$status_file"
+          sql_dbs=$(az sql db list --query "[].{rg:resourceGroup,server:serverName,name:name,status:status}" -o tsv 2>/dev/null | tr '\n' '|' | cut -c1-4000)
+          echo "AZURE_SQL_DATABASES=$sql_dbs" >> "$status_file"
+          vnets=$(az network vnet list --query "[].{rg:resourceGroup,name:name,location:location,prefixes:addressSpace.addressPrefixes}" -o tsv 2>/dev/null | tr '\n' '|' | cut -c1-4000)
+          echo "VNETS=$vnets" >> "$status_file"
+          gateways=$(az network vnet-gateway list --query "[].{rg:resourceGroup,name:name,type:gatewayType,vpn:vpnType,location:location}" -o tsv 2>/dev/null | tr '\n' '|' | cut -c1-3000)
+          echo "VNET_GATEWAYS=$gateways" >> "$status_file"
+          localgws=$(az network local-gateway list --query "[].{rg:resourceGroup,name:name,ip:gatewayIpAddress}" -o tsv 2>/dev/null | tr '\n' '|' | cut -c1-3000)
+          echo "LOCAL_NETWORK_GATEWAYS=$localgws" >> "$status_file"
+          vnetint=$(az webapp vnet-integration list -g "$TARGET_RG" -n "$WEB_APP" --query "[].{vnet:vnetResourceId,routeAll:vnetRouteAllEnabled}" -o tsv 2>/dev/null | tr '\n' '|' | cut -c1-3000)
+          echo "APP_VNET_INTEGRATION=$vnetint" >> "$status_file"
+          hybrid=$(az webapp hybrid-connection list -g "$TARGET_RG" -n "$WEB_APP" --query "[].{host:hostname,port:port,relay:relayArmUri}" -o tsv 2>/dev/null | tr '\n' '|' | cut -c1-3000)
+          echo "APP_HYBRID_CONNECTIONS=$hybrid" >> "$status_file"
+          echo "APP_OUTBOUND_IPS=$(az webapp show -g "$TARGET_RG" -n "$WEB_APP" --query possibleOutboundIpAddresses -o tsv 2>/dev/null)" >> "$status_file"
 
           if grep -q '^KVSF_FEDERATED_CREDENTIAL=\(created\|already_present\)$' "$status_file" && grep -q '^TARGET_RG_CONTRIBUTOR=\(created\|already_present\)$' "$status_file"; then
             echo 'BOOTSTRAP=success' >> "$status_file"
