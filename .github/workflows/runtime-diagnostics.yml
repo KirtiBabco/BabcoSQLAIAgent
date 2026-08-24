@@ -44,14 +44,16 @@ jobs:
           OutSafe 'SQL_SETTING_PRESENT' (-not [string]::IsNullOrWhiteSpace($cs))
           try {
             Add-Type -AssemblyName System.Data
-            # Permanent compatibility rule: System.Data.SqlClient requires "Connect Timeout".
-            # Some Azure/external connection-string generators emit "ConnectTimeout".
-            $cs=[regex]::Replace([string]$cs,'(?i)(^|;)\s*ConnectTimeout\s*=','$1Connect Timeout=')
-            $cs=[regex]::Replace([string]$cs,'(?i)(^|;)\s*ConnectionTimeout\s*=','$1Connection Timeout=')
-            $b=New-Object System.Data.SqlClient.SqlConnectionStringBuilder($cs)
+            $hadAlias=[regex]::IsMatch([string]$cs,'(?i)\bConnectTimeout\s*=')
+            OutSafe 'SQL_CONNECT_TIMEOUT_ALIAS_FOUND' $hadAlias
+            $cs=[regex]::Replace([string]$cs,'(?i)\bConnectTimeout\s*=','Connect Timeout=')
+            $cs=[regex]::Replace([string]$cs,'(?i)\bConnectionTimeout\s*=','Connection Timeout=')
+            $aliasAfter=[regex]::IsMatch([string]$cs,'(?i)\bConnectTimeout\s*=')
+            OutSafe 'SQL_CONNECT_TIMEOUT_ALIAS_AFTER_NORMALIZE' $aliasAfter
+            $b=[System.Data.SqlClient.SqlConnectionStringBuilder]::new([string]$cs)
             $b.ConnectTimeout=10
             $sw=[Diagnostics.Stopwatch]::StartNew()
-            $c=New-Object System.Data.SqlClient.SqlConnection($b.ConnectionString)
+            $c=[System.Data.SqlClient.SqlConnection]::new($b.ConnectionString)
             $c.Open()
             $cmd=$c.CreateCommand();$cmd.CommandTimeout=10;$cmd.CommandText='SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES'
             $tables=$cmd.ExecuteScalar()
@@ -69,13 +71,20 @@ jobs:
           OutSafe 'OPENAI_MODEL_TESTED' $model
           if(-not [string]::IsNullOrWhiteSpace($key)){
             try {
-              $payload=@{model=$model;input='Reply only OK';max_output_tokens=8}|ConvertTo-Json -Compress
+              $payload=@{model=$model;input='Reply only OK';max_output_tokens=32}|ConvertTo-Json -Compress
               $sw=[Diagnostics.Stopwatch]::StartNew()
               $r=Invoke-WebRequest -Method Post -Uri $url -Headers @{Authorization=('Bearer '+$key)} -ContentType 'application/json' -Body $payload -UseBasicParsing -TimeoutSec 25
               $sw.Stop();OutSafe 'OPENAI_OK' ([int]$r.StatusCode -ge 200 -and [int]$r.StatusCode -lt 300);OutSafe 'OPENAI_HTTP' ([int]$r.StatusCode);OutSafe 'OPENAI_MS' $sw.ElapsedMilliseconds
             } catch {
-              $status='';try{$status=[int]$_.Exception.Response.StatusCode}catch{}
-              OutSafe 'OPENAI_OK' 'false';OutSafe 'OPENAI_HTTP' $status;OutSafe 'OPENAI_ERROR_TYPE' $_.Exception.GetType().Name;OutSafe 'OPENAI_ERROR' ($_.Exception.Message -replace '[\r\n]+',' ')
+              $status='';$body=''
+              try{$status=[int]$_.Exception.Response.StatusCode}catch{}
+              try {
+                $stream=$_.Exception.Response.GetResponseStream()
+                if($stream){$reader=New-Object IO.StreamReader($stream);$body=$reader.ReadToEnd();$reader.Dispose()}
+              } catch {}
+              if($body.Length -gt 1200){$body=$body.Substring(0,1200)}
+              $body=$body -replace '[\r\n]+',' '
+              OutSafe 'OPENAI_OK' 'false';OutSafe 'OPENAI_HTTP' $status;OutSafe 'OPENAI_ERROR_TYPE' $_.Exception.GetType().Name;OutSafe 'OPENAI_ERROR' ($_.Exception.Message -replace '[\r\n]+',' ');OutSafe 'OPENAI_ERROR_BODY' $body
             }
           } else { OutSafe 'OPENAI_OK' 'false';OutSafe 'OPENAI_ERROR' 'No server-side OpenAI API key configured.' }
           '@
