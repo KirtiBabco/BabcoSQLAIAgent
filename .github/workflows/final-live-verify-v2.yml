@@ -1,0 +1,97 @@
+name: Final Live Verify V2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/final-live-verify-v2.yml'
+      - 'ops/run-final-live-verify-v2.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: 7a21e1b8-ee78-429e-8051-5dce354e3e1d
+  AZURE_TENANT_ID: 7e3bfe8e-acb5-4e0e-9798-c05331d2940c
+  AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
+  RG: rg-babco-rnd-sandbox
+  SOURCE_APP: app-babco-unloadcompare-0e27b0b7-260818
+  TARGET_APP: babco-sqlagent-wf-2c606af4
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Mirror working Babco setting
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $p=Join-Path $env:RUNNER_TEMP 'status.txt';"SOURCE_COMMIT=$env:GITHUB_SHA"|Set-Content $p
+          $cs=az webapp config appsettings list -g $env:RG -n $env:SOURCE_APP --query "[?name=='BabcoSupportConnectionString'].value | [0]" -o tsv --only-show-errors
+          if([string]::IsNullOrWhiteSpace($cs)){throw 'Source setting missing'}
+          Write-Output "::add-mask::$cs"
+          $cs=[regex]::Replace([string]$cs,'(?i)\bConnectTimeout\s*=','Connect Timeout=')
+          $cs=[regex]::Replace([string]$cs,'(?i)\bConnectionTimeout\s*=','Connect Timeout=')
+          $cs=[regex]::Replace([string]$cs,'(?i)(^|;)\s*Timeout\s*=','$1Connect Timeout=')
+          Write-Output "::add-mask::$cs"
+          az webapp config appsettings set -g $env:RG -n $env:TARGET_APP --settings "BAP_SUPPORT_CONNECTION_STRING=$cs" "SQL_BAP_SUPPORT_CONNECTION_STRING=$cs" "SQL_CONNECTION_STRING=$cs" --only-show-errors|Out-Null
+          Add-Content $p 'BABCO_MIRROR=success'
+          az webapp restart -g $env:RG -n $env:TARGET_APP --only-show-errors|Out-Null
+          Start-Sleep 15
+
+      - name: Inline SQL and OpenAI verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $p=Join-Path $env:RUNNER_TEMP 'status.txt'
+          $profiles=az webapp deployment list-publishing-profiles -g $env:RG -n $env:TARGET_APP -o json|ConvertFrom-Json
+          $x=@($profiles|Where-Object {$_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy'}|Select-Object -First 1)
+          $u=[string]$x[0].userName;$pw=[string]$x[0].userPWD;Write-Output "::add-mask::$u";Write-Output "::add-mask::$pw"
+          $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw));$h=@{Authorization="Basic $basic"}
+          $script=@'
+          $ErrorActionPreference='Continue'
+          function O($k,$v){Write-Output ($k+'='+[string]$v)}
+          Add-Type -AssemblyName System.Data
+          $cs=[Environment]::GetEnvironmentVariable('BAP_SUPPORT_CONNECTION_STRING')
+          try{$b=New-Object System.Data.SqlClient.SqlConnectionStringBuilder($cs);$b.ConnectTimeout=15;$c=New-Object System.Data.SqlClient.SqlConnection($b.ConnectionString);$c.Open();$q=$c.CreateCommand();$q.CommandTimeout=15;$q.CommandText='SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES';$n=$q.ExecuteScalar();$c.Close();O 'SQL_OK' 'true';O 'SQL_TABLE_COUNT' $n;O 'SQL_SERVER_HOST' $b.DataSource;O 'SQL_DATABASE' $b.InitialCatalog}catch{O 'SQL_OK' 'false';O 'SQL_ERROR_TYPE' $_.Exception.GetType().Name;O 'SQL_ERROR' ($_.Exception.Message -replace '[\r\n]+',' ')}
+          $k=[Environment]::GetEnvironmentVariable('OPENAI_API_KEY_DEVELOPMENT')
+          try{$j=@{model='gpt-5-mini';input='Reply only OK';max_output_tokens=16}|ConvertTo-Json -Compress;$r=Invoke-WebRequest -Method Post -Uri 'https://api.openai.com/v1/responses' -Headers @{Authorization=('Bearer '+$k)} -ContentType 'application/json' -Body $j -UseBasicParsing -TimeoutSec 30;O 'OPENAI_OK' 'true';O 'OPENAI_HTTP' ([int]$r.StatusCode)}catch{O 'OPENAI_OK' 'false'}
+          '@
+          $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script));$body=@{command="powershell -NoProfile -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
+          $r=Invoke-RestMethod -Method Post -Uri "https://$env:TARGET_APP.scm.azurewebsites.net/api/command" -Headers $h -ContentType 'application/json' -Body $body -TimeoutSec 120
+          $safe=(([string]$r.Output)+"`n"+([string]$r.Error)) -split "`r?`n"|Where-Object {$_ -match '^(SQL_|OPENAI_)'}
+          $safe|Add-Content $p
+
+      - name: HTTP verification
+        shell: pwsh
+        run: |
+          $p=Join-Path $env:RUNNER_TEMP 'status.txt'
+          $login=0;try{$r=Invoke-WebRequest -Uri "https://$env:TARGET_APP.azurewebsites.net/Login.aspx" -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 30;$login=[int]$r.StatusCode}catch{};Add-Content $p "LOGIN_HTTP=$login"
+          $entra=0;try{$r=Invoke-WebRequest -Uri "https://$env:TARGET_APP.azurewebsites.net/.auth/login/aad" -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30 -ErrorAction Stop;$entra=[int]$r.StatusCode}catch{try{$entra=[int]$_.Exception.Response.StatusCode}catch{}};Add-Content $p "ENTRA_HTTP=$entra"
+          $s=Get-Content $p
+          if(($s -match '^SQL_OK=true$') -and ($s -match '^OPENAI_OK=true$') -and ($s -match '^LOGIN_HTTP=200$') -and ($s -match '^ENTRA_HTTP=(302|401)$')){Add-Content $p 'VERIFY=success'}else{Add-Content $p 'VERIFY=failure'}
+          Add-Content $p "CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
+
+      - name: Publish final status
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $d=Join-Path $env:RUNNER_TEMP 'pub';New-Item -ItemType Directory -Path $d -Force|Out-Null;$p=Join-Path $env:RUNNER_TEMP 'status.txt';if(Test-Path $p){Copy-Item $p (Join-Path $d 'status.txt')}else{'VERIFY=failure'|Set-Content (Join-Path $d 'status.txt')};Push-Location $d;git init|Out-Null;git checkout -b final-live-v2-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish final live v2 status'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin final-live-v2-status|Out-Null;Pop-Location
+
+      - name: Require full success
+        if: always()
+        shell: pwsh
+        run: |
+          $p=Join-Path $env:RUNNER_TEMP 'status.txt';if(-not((Get-Content $p) -match '^VERIFY=success$')){throw 'Final verification failed'}
