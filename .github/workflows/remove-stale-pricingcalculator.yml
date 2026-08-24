@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/remove-stale-pricingcalculator.yml'
+      - 'ops/run-stale-file-repair.txt'
   workflow_dispatch:
 
 permissions:
@@ -55,7 +56,7 @@ jobs:
         run: |
           $url="https://$env:WEB_APP.azurewebsites.net/Login.aspx"
           $code=0
-          for($i=1;$i -le 24;$i++){
+          for($i=1;$i -le 36;$i++){
             try{$r=Invoke-WebRequest -Uri $url -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 20;$code=[int]$r.StatusCode}catch{$code=0}
             if($code -eq 200){break}
             Start-Sleep -Seconds 5
