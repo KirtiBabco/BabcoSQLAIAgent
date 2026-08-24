@@ -1,0 +1,1 @@
+Trigger sequenced Azure deployment and post-deploy SQL/OpenAI health verification on 2026-08-24.
