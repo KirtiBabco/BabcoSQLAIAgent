@@ -1,2 +1,2 @@
 Trigger production verification after synchronizing app-babco-unloadcompare-0e27b0b7-260814:BabcoSupportConnectionString into BabcoSQLAIAgent.
-Final live verification after successful full-package recovery deployment at 2026-08-24T09:02Z.
+Final live verification after clean App_Code deployment commit 4691f409f14d35bc18ac207cfa33e215a0a0ced7.
