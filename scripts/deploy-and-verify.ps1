@@ -1,6 +1,6 @@
 $ErrorActionPreference='Stop'
 $repoRoot=$env:GITHUB_WORKSPACE;$resourceGroup=$env:AZURE_RESOURCE_GROUP;$webApp=$env:WEB_APP;$loginUrl=$env:LOGIN_URL;$defaultUrl=$env:DEFAULT_URL;$easyAuthUrl=$env:EASY_AUTH_URL
-$healthUrl="$loginUrl?health=1"
+$healthUrl=$loginUrl + '?health=1'
 $status=[ordered]@{SOURCE_COMMIT=$env:GITHUB_SHA;PACKAGE='failure';OIDC='success';SETTINGS='failure';DEPLOY='failure';BACKEND='failure';VERIFY='failure'}
 $healthToken=''
 function SetS([string]$k,[object]$v){$script:status[$k]=if($null -eq $v){''}else{[string]$v}}
