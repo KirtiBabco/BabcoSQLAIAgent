@@ -9,12 +9,6 @@ function GetKeyNames([string]$v){
   }
   return ($names -join ',')
 }
-function SafeMessage([string]$v){
-  if([string]::IsNullOrWhiteSpace($v)){return ''}
-  $v=($v -replace '[\r\n]+',' ').Trim()
-  if($v.Length -gt 300){$v=$v.Substring(0,300)}
-  return $v
-}
 function NormalizeSql([string]$v){
   if([string]::IsNullOrWhiteSpace($v)){return ''}
   $v=$v.Trim()
@@ -26,21 +20,65 @@ function NormalizeSql([string]$v){
   $v=[regex]::Replace($v,'(?i)(^|;)\s*Timeout\s*=','$1Connect Timeout=')
   return $v.Trim()
 }
+function FindSqlException([Exception]$ex){
+  $current=$ex
+  for($i=0;$i -lt 8 -and $null -ne $current;$i++){
+    if($current -is [System.Data.SqlClient.SqlException]){return $current}
+    $current=$current.InnerException
+  }
+  return $null
+}
 function Classify([Exception]$ex){
-  if($ex -is [System.Data.SqlClient.SqlException]){
-    switch($ex.Number){
+  $sqlEx=FindSqlException $ex
+  if($null -ne $sqlEx){
+    switch($sqlEx.Number){
       -2 {return 'CONNECT_TIMEOUT'}
-      18456 {return 'AUTHENTICATION_FAILED'}
-      4060 {return 'DATABASE_ACCESS_FAILED'}
+      2 {return 'SERVER_NOT_FOUND'}
+      26 {return 'INSTANCE_NOT_FOUND'}
+      40 {return 'NETWORK_PATH_OR_INSTANCE'}
       53 {return 'NETWORK_OR_DNS'}
+      258 {return 'WAIT_TIMEOUT'}
       10060 {return 'NETWORK_TIMEOUT'}
       11001 {return 'DNS_LOOKUP_FAILED'}
-      default {return ('SQL_ERROR_'+$ex.Number)}
+      18456 {return 'AUTHENTICATION_FAILED'}
+      4060 {return 'DATABASE_ACCESS_FAILED'}
+      default {return ('SQL_ERROR_'+$sqlEx.Number)}
     }
   }
   if($ex -is [ArgumentException]){return 'CONNECTION_STRING_FORMAT'}
   return $ex.GetType().Name.ToUpperInvariant()
 }
+function IsPrivateIp([System.Net.IPAddress]$ip){
+  if($ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork){return $false}
+  $b=$ip.GetAddressBytes()
+  if($b[0] -eq 10){return $true}
+  if($b[0] -eq 172 -and $b[1] -ge 16 -and $b[1] -le 31){return $true}
+  if($b[0] -eq 192 -and $b[1] -eq 168){return $true}
+  if($b[0] -eq 127){return $true}
+  return $false
+}
+function SafeMessage([Exception]$ex,[string]$serverSpec){
+  $target=$ex
+  $sqlEx=FindSqlException $ex
+  if($null -ne $sqlEx){$target=$sqlEx}
+  $v=[string]$target.Message
+  if(-not [string]::IsNullOrWhiteSpace($serverSpec)){$v=$v.Replace($serverSpec,'[SQL_SERVER]')}
+  $v=($v -replace '[\r\n]+',' ').Trim()
+  if($v.Length -gt 400){$v=$v.Substring(0,400)}
+  return $v
+}
+function TestTcp([string]$hostName,[int]$port){
+  $client=$null
+  try{
+    $client=New-Object System.Net.Sockets.TcpClient
+    $ar=$client.BeginConnect($hostName,$port,$null,$null)
+    if(-not $ar.AsyncWaitHandle.WaitOne(5000,$false)){return $false}
+    $client.EndConnect($ar);return $client.Connected
+  }catch{return $false}
+  finally{if($null -ne $client){$client.Close()}}
+}
+
+$serverSpec=''
 try{
   Add-Type -AssemblyName System.Data
   $raw=[Environment]::GetEnvironmentVariable('BAP_SUPPORT_CONNECTION_STRING')
@@ -50,11 +88,49 @@ try{
   OutSafe 'SQL_RUNTIME_NORMALIZED_KEY_NAMES' (GetKeyNames $cs)
   $builder=New-Object System.Data.SqlClient.SqlConnectionStringBuilder $cs
   $builder['Connect Timeout']=10
-  $hostName=([string]$builder.DataSource).Trim().ToLowerInvariant()
-  if($hostName.StartsWith('tcp:')){$hostName=$hostName.Substring(4)}
-  if($hostName.Contains(',')){$hostName=$hostName.Split(',')[0]}
-  OutSafe 'SQL_SERVER_KIND' ($(if($hostName.EndsWith('.database.windows.net')){'AZURE_SQL'}else{'SQL_SERVER'}))
+
+  $serverSpec=([string]$builder.DataSource).Trim()
+  $spec=$serverSpec
+  $protocol='AUTO'
+  if($spec.StartsWith('tcp:',[StringComparison]::OrdinalIgnoreCase)){$protocol='TCP';$spec=$spec.Substring(4)}
+  elseif($spec.StartsWith('np:',[StringComparison]::OrdinalIgnoreCase)){$protocol='NAMED_PIPE';$spec=$spec.Substring(3)}
+  OutSafe 'SQL_DATASOURCE_PROTOCOL' $protocol
+
+  $hasInstance=$spec.Contains('\')
+  OutSafe 'SQL_NAMED_INSTANCE' $hasInstance.ToString().ToLowerInvariant()
+  $hostPart=$spec
+  $instanceName=''
+  if($hasInstance){$pieces=$spec.Split('\',2);$hostPart=$pieces[0];$instanceName=$pieces[1]}
+  $explicitPort=0
+  if($hostPart.Contains(',')){
+    $hp=$hostPart.Split(',',2);$hostPart=$hp[0];[int]::TryParse($hp[1],[ref]$explicitPort)|Out-Null
+  }elseif((-not $hasInstance) -and $spec.Contains(',')){
+    $hp=$spec.Split(',',2);$hostPart=$hp[0];[int]::TryParse($hp[1],[ref]$explicitPort)|Out-Null
+  }
+  OutSafe 'SQL_EXPLICIT_PORT' ($(if($explicitPort -gt 0){$explicitPort}else{''}))
+
+  $hostLower=$hostPart.Trim().ToLowerInvariant()
+  OutSafe 'SQL_SERVER_KIND' ($(if($hostLower.EndsWith('.database.windows.net')){'AZURE_SQL'}else{'SQL_SERVER'}))
   OutSafe 'SQL_DATABASE_PRESENT' (-not [string]::IsNullOrWhiteSpace([string]$builder.InitialCatalog))
+
+  $ipObj=$null
+  $isLiteral=[System.Net.IPAddress]::TryParse($hostPart,[ref]$ipObj)
+  if($isLiteral){OutSafe 'SQL_SERVER_ADDRESS_TYPE' ($(if(IsPrivateIp $ipObj){'PRIVATE_IP'}else{'PUBLIC_IP'}))}
+  else{OutSafe 'SQL_SERVER_ADDRESS_TYPE' 'HOSTNAME'}
+
+  $dnsOk=$false;$resolved=@()
+  try{$resolved=@([System.Net.Dns]::GetHostAddresses($hostPart));$dnsOk=$resolved.Count -gt 0}catch{}
+  OutSafe 'SQL_DNS_OK' $dnsOk.ToString().ToLowerInvariant()
+  if($dnsOk -and -not $isLiteral){
+    $hasPrivate=$false;foreach($addr in $resolved){if(IsPrivateIp $addr){$hasPrivate=$true;break}}
+    OutSafe 'SQL_DNS_SCOPE' ($(if($hasPrivate){'PRIVATE_OR_MIXED'}else{'PUBLIC'}))
+  }
+
+  $testPort=$explicitPort
+  if($testPort -le 0 -and -not $hasInstance){$testPort=1433}
+  if($testPort -gt 0){OutSafe 'SQL_TCP_TEST_PORT' $testPort;OutSafe 'SQL_TCP_OK' (TestTcp $hostPart $testPort).ToString().ToLowerInvariant()}
+  else{OutSafe 'SQL_TCP_TEST_PORT' '';OutSafe 'SQL_TCP_OK' 'not_tested_named_instance_dynamic_port'}
+
   $sw=[Diagnostics.Stopwatch]::StartNew()
   $connection=New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString
   $connection.Open()
@@ -62,7 +138,7 @@ try{
   $tables=$command.ExecuteScalar();$connection.Close();$sw.Stop()
   OutSafe 'SQL_OK' 'true';OutSafe 'SQL_TABLE_COUNT' $tables;OutSafe 'SQL_MS' $sw.ElapsedMilliseconds;OutSafe 'SQL_ERROR_CLASSIFICATION' 'OK';OutSafe 'SQL_ERROR_NUMBER' '';OutSafe 'SQL_ERROR_MESSAGE' ''
 }catch{
-  $e=$_.Exception
-  OutSafe 'SQL_OK' 'false';OutSafe 'SQL_ERROR_TYPE' $e.GetType().Name;OutSafe 'SQL_ERROR_CLASSIFICATION' (Classify $e);OutSafe 'SQL_ERROR_MESSAGE' (SafeMessage $e.Message)
-  if($e -is [System.Data.SqlClient.SqlException]){OutSafe 'SQL_ERROR_NUMBER' $e.Number}else{OutSafe 'SQL_ERROR_NUMBER' ''}
+  $e=$_.Exception;$sqlEx=FindSqlException $e
+  OutSafe 'SQL_OK' 'false';OutSafe 'SQL_ERROR_TYPE' $e.GetType().Name;OutSafe 'SQL_ERROR_CLASSIFICATION' (Classify $e);OutSafe 'SQL_ERROR_MESSAGE' (SafeMessage $e $serverSpec)
+  if($null -ne $sqlEx){OutSafe 'SQL_ERROR_NUMBER' $sqlEx.Number}else{OutSafe 'SQL_ERROR_NUMBER' ''}
 }
