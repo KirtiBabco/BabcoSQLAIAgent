@@ -1,4 +1,4 @@
-name: Inspect Babco SQL Network
+name: Configure and Inspect Babco SQL Network
 
 on:
   push:
@@ -19,11 +19,16 @@ env:
   RG: rg-babco-rnd-sandbox
   SOURCE_APP: app-babco-unloadcompare-0e27b0b7-260818
   TARGET_APP: babco-sqlagent-wf-2c606af4
+  LOCATION: centralindia
+  RELAY_NAMESPACE: relay-babco-unloadcompare-0e27b0b7
+  HYBRID_CONNECTION_NAME: hc-babco-sql
+  SQL_HOST: DESKTOP-RGFJ2N8
+  SQL_PORT: '1433'
 
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: azure/login@v2
         with:
@@ -32,12 +37,48 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Inspect safe network metadata
+      - name: Create or reuse Relay Hybrid Connection and attach target app
         shell: bash
         run: |
           set +e
           out="$RUNNER_TEMP/network-status.txt"
           echo "SOURCE_COMMIT=$GITHUB_SHA" > "$out"
+          az config set extension.use_dynamic_install=yes_without_prompt >/dev/null 2>&1 || true
+
+          if az relay namespace show -g "$RG" -n "$RELAY_NAMESPACE" >/dev/null 2>&1; then
+            echo 'RELAY_NAMESPACE=existing' >> "$out"
+          else
+            if az relay namespace create -g "$RG" -n "$RELAY_NAMESPACE" -l "$LOCATION" >/dev/null 2>&1; then
+              echo 'RELAY_NAMESPACE=created' >> "$out"
+            else
+              echo 'RELAY_NAMESPACE=create_failed' >> "$out"
+            fi
+          fi
+
+          metadata="[{\"key\":\"endpoint\",\"value\":\"${SQL_HOST}:${SQL_PORT}\"}]"
+          if az relay hyco show -g "$RG" --namespace-name "$RELAY_NAMESPACE" -n "$HYBRID_CONNECTION_NAME" >/dev/null 2>&1; then
+            az relay hyco update -g "$RG" --namespace-name "$RELAY_NAMESPACE" -n "$HYBRID_CONNECTION_NAME" --requires-client-authorization true --user-metadata "$metadata" >/dev/null 2>&1
+            [ $? -eq 0 ] && echo 'HYBRID_RESOURCE=existing_updated' >> "$out" || echo 'HYBRID_RESOURCE=update_failed' >> "$out"
+          else
+            az relay hyco create -g "$RG" --namespace-name "$RELAY_NAMESPACE" -n "$HYBRID_CONNECTION_NAME" --requires-client-authorization true --user-metadata "$metadata" >/dev/null 2>&1
+            [ $? -eq 0 ] && echo 'HYBRID_RESOURCE=created' >> "$out" || echo 'HYBRID_RESOURCE=create_failed' >> "$out"
+          fi
+
+          existing=$(az webapp hybrid-connection list -g "$RG" -n "$TARGET_APP" --query "[?name=='$HYBRID_CONNECTION_NAME'] | [0].name" -o tsv --only-show-errors 2>/dev/null)
+          if [ -n "$existing" ]; then
+            echo 'TARGET_HYBRID_ATTACH=existing' >> "$out"
+          else
+            az webapp hybrid-connection add -g "$RG" -n "$TARGET_APP" --namespace "$RELAY_NAMESPACE" --hybrid-connection "$HYBRID_CONNECTION_NAME" >/dev/null 2>&1
+            [ $? -eq 0 ] && echo 'TARGET_HYBRID_ATTACH=attached' >> "$out" || echo 'TARGET_HYBRID_ATTACH=attach_failed' >> "$out"
+          fi
+          az webapp restart -g "$RG" -n "$TARGET_APP" --only-show-errors >/dev/null 2>&1 || true
+
+      - name: Inspect safe network metadata
+        shell: bash
+        run: |
+          set +e
+          out="$RUNNER_TEMP/network-status.txt"
+          [ -f "$out" ] || echo "SOURCE_COMMIT=$GITHUB_SHA" > "$out"
           for app in "$SOURCE_APP" "$TARGET_APP"; do
             prefix="SOURCE"
             [ "$app" = "$TARGET_APP" ] && prefix="TARGET"
@@ -51,19 +92,6 @@ jobs:
             else
               echo "${prefix}_HYBRID_LIST_ERROR=true" >> "$out"
             fi
-            vnet=$(az webapp vnet-integration list -g "$RG" -n "$app" -o json --only-show-errors 2>/dev/null)
-            if [ $? -eq 0 ]; then
-              count=$(jq 'length' <<< "$vnet")
-              echo "${prefix}_VNET_COUNT=$count" >> "$out"
-              jq -r --arg p "$prefix" '.[] | [$p, (.vnetResourceId // .subnetResourceId // .id // "")] | @tsv' <<< "$vnet" | while IFS=$'\t' read -r p id; do echo "${p}_VNET=$id" >> "$out"; done
-            else
-              echo "${prefix}_VNET_LIST_ERROR=true" >> "$out"
-            fi
-            settings=$(az webapp config appsettings list -g "$RG" -n "$app" -o json --only-show-errors 2>/dev/null)
-            dns=$(jq -r '[.[]|select(.name=="WEBSITE_DNS_SERVER")][0].value // empty' <<< "$settings")
-            route=$(jq -r '[.[]|select(.name=="WEBSITE_VNET_ROUTE_ALL")][0].value // empty' <<< "$settings")
-            [ -n "$dns" ] && echo "${prefix}_CUSTOM_DNS_PRESENT=true" >> "$out" || echo "${prefix}_CUSTOM_DNS_PRESENT=false" >> "$out"
-            echo "${prefix}_VNET_ROUTE_ALL=${route}" >> "$out"
           done
           echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$out"
 
