@@ -1,1 +1,1 @@
-Deploy current source with kirti@babcofoods.com hardcoded as Admin, preserve working Babco SQL mirror, and verify Login/Entra.
+Deploy current source with missing AuthComplete.aspx callback page added. Preserve working Babco SQL, Entra, OpenAI, hardcoded Admin, and verify login callback.
