@@ -1,0 +1,1 @@
+Scan existing App Services for safe Babco SQL endpoint metadata and find a reachable replacement for DESKTOP-RGFJ2N8.
