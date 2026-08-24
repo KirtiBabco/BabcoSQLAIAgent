@@ -19,6 +19,7 @@ env:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Azure login
         uses: azure/login@v2
@@ -28,7 +29,7 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Scan App Services for safe BAP SQL metadata
+      - name: Scan existing App Services for safe Babco SQL metadata
         shell: bash
         run: |
           set +e
@@ -38,23 +39,46 @@ jobs:
           apps=$(az webapp list --query "[].{name:name,rg:resourceGroup}" -o tsv 2>/dev/null)
           while IFS=$'\t' read -r app rg; do
             [ -z "$app" ] && continue
-            json=$(az webapp config appsettings list -g "$rg" -n "$app" -o json 2>/dev/null)
-            value=$(printf '%s' "$json" | python3 -c "import sys,json; a=json.load(sys.stdin); print(next((str(x.get('value','')) for x in a if str(x.get('name','')).upper()=='BAP_SUPPORT_CONNECTION_STRING'),''))" 2>/dev/null)
-            [ -z "$value" ] && continue
-            safe=$(VALUE="$value" python3 - <<'PY'
-import os
+            aset=$(az webapp config appsettings list -g "$rg" -n "$app" -o json 2>/dev/null)
+            cset=$(az webapp config connection-string list -g "$rg" -n "$app" -o json 2>/dev/null)
+            VALUES_JSON="$(python3 - <<'PY' "$aset" "$cset"
+import json,sys
+keys={'BAP_SUPPORT_CONNECTION_STRING','SQL_BAP_SUPPORT_CONNECTION_STRING','SQL_CONNECTION_STRING','BABCOSUPPORTCONNECTIONSTRING','CONNECTIONSTRING'}
+out=[]
+for kind,raw in [('APPSETTING',sys.argv[1]),('CONNECTION',sys.argv[2])]:
+    try:a=json.loads(raw or '[]')
+    except:a=[]
+    for x in a:
+        n=str(x.get('name',''))
+        if n.upper() in keys:
+            v=str(x.get('value',''))
+            if v: out.append({'kind':kind,'name':n,'value':v})
+print(json.dumps(out))
+PY
+)"
+            count=$(jq 'length' <<< "$VALUES_JSON" 2>/dev/null)
+            [ "${count:-0}" -eq 0 ] && continue
+            for idx in $(seq 0 $((count-1))); do
+              kind=$(jq -r ".[$idx].kind" <<< "$VALUES_JSON")
+              name=$(jq -r ".[$idx].name" <<< "$VALUES_JSON")
+              value=$(jq -r ".[$idx].value" <<< "$VALUES_JSON")
+              safe=$(VALUE="$value" python3 - <<'PY'
+import os,re
 v=os.environ.get('VALUE','').strip().strip('"').strip("'")
+v=re.sub(r'(?i)\bConnectTimeout\s*=', 'Connect Timeout=', v)
 parts={}
 for p in v.split(';'):
     if '=' in p:
         k,val=p.split('=',1);parts[k.strip().lower().replace(' ','')]=val.strip()
 host=parts.get('datasource') or parts.get('server') or parts.get('address') or parts.get('addr') or parts.get('networkaddress') or ''
 db=parts.get('initialcatalog') or parts.get('database') or ''
-kind='AZURE_SQL' if host.lower().replace('tcp:','').split(',')[0].endswith('.database.windows.net') else 'SQL_SERVER'
-print(f"HOST={host}|DB={db}|KIND={kind}")
+hostclean=host.lower().replace('tcp:','').split(',')[0].split('\\')[0]
+kind='AZURE_SQL' if hostclean.endswith('.database.windows.net') else 'SQL_SERVER'
+print(f"HOST={host}|DB={db}|SERVER_KIND={kind}")
 PY
 )
-            echo "APP=$app|RG=$rg|$safe" >> "$out"
+              echo "APP=$app|RG=$rg|SOURCE_KIND=$kind|KEY=$name|$safe" >> "$out"
+            done
           done <<< "$apps"
           echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$out"
           cat "$out"
