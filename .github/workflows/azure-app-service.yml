@@ -40,7 +40,7 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Reuse and normalize global Babco support connection
+      - name: Reuse Babco App Service connection-string secret
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -51,22 +51,28 @@ jobs:
             -o tsv `
             --only-show-errors
           if ([string]::IsNullOrWhiteSpace($bap) -or $bap -eq 'null') {
-            throw "Established global BabcoSupportConnectionString was not found on $($env:GLOBAL_BABCO_SOURCE_APP)."
+            throw "BabcoSupportConnectionString was not found on $($env:GLOBAL_BABCO_SOURCE_APP)."
           }
           Write-Output "::add-mask::$bap"
           $bap = [regex]::Replace([string]$bap, '(?i)\bConnectTimeout\s*=', 'Connect Timeout=')
           $bap = [regex]::Replace([string]$bap, '(?i)\bConnectionTimeout\s*=', 'Connection Timeout=')
           $bap = [regex]::Replace([string]$bap, '(?i)(^|;)\s*Timeout\s*=', '$1Connect Timeout=')
           Write-Output "::add-mask::$bap"
-          az webapp config appsettings set `
+
+          az webapp config appsettings delete `
             -g $env:AZURE_RESOURCE_GROUP `
             -n $env:WEB_APP `
-            --settings `
-              "BAP_SUPPORT_CONNECTION_STRING=$bap" `
-              "SQL_BAP_SUPPORT_CONNECTION_STRING=$bap" `
-              "SQL_CONNECTION_STRING=$bap" `
+            --setting-names BAP_SUPPORT_CONNECTION_STRING SQL_BAP_SUPPORT_CONNECTION_STRING SQL_CONNECTION_STRING `
             --only-show-errors | Out-Null
-          Write-Host "GLOBAL_BABCO_CONNECTION=applied_normalized"
+
+          az webapp config connection-string set `
+            -g $env:AZURE_RESOURCE_GROUP `
+            -n $env:WEB_APP `
+            --connection-string-type SQLServer `
+            --settings "BabcoSupportConnectionString=$bap" `
+            --only-show-errors | Out-Null
+
+          Write-Host "GLOBAL_BABCO_CONNECTION=connection_string_secret"
 
       - name: Use current supplied source ZIP only
         shell: pwsh
