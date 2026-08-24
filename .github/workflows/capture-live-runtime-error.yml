@@ -1,3 +1,4 @@
+# Fresh runtime capture after clean App_Code deployment
 name: Capture Live Runtime Error
 
 on:
