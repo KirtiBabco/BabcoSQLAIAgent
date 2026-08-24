@@ -5,6 +5,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Production deployments are serialized; only the newest run may deploy/restart the App Service.
 concurrency:
   group: babco-sqlagent-production
   cancel-in-progress: true
