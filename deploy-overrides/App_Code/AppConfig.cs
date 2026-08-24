@@ -127,10 +127,10 @@ namespace SQL_AI_Agent
         {
             if (string.IsNullOrWhiteSpace(value)) return "";
 
-            // Azure/other tooling sometimes emits ConnectTimeout without a space.
-            // System.Data.SqlClient (.NET Framework) requires Connect Timeout / Connection Timeout.
-            value = Regex.Replace(value, @"(?i)(^|;)\s*ConnectTimeout\s*=", "$1Connect Timeout=");
-            value = Regex.Replace(value, @"(?i)(^|;)\s*ConnectionTimeout\s*=", "$1Connection Timeout=");
+            // System.Data.SqlClient does not accept the compact ConnectTimeout alias.
+            // Normalize it anywhere in the string, case-insensitively, before SqlConnection parses it.
+            value = Regex.Replace(value, @"(?i)\bConnectTimeout\s*=", "Connect Timeout=");
+            value = Regex.Replace(value, @"(?i)\bConnectionTimeout\s*=", "Connection Timeout=");
             return value.Trim();
         }
 
