@@ -44,16 +44,23 @@ jobs:
           Write-Output "::add-mask::$u";Write-Output "::add-mask::$pw"
           $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
           $repair=@'
-          $ErrorActionPreference='Stop'
-          $f='D:\home\site\wwwroot\App_Code\PricingCalculator.cs'
-          if(Test-Path $f){Remove-Item $f -Force;Write-Output 'STALE_PRICINGCALCULATOR=removed'}else{Write-Output 'STALE_PRICINGCALCULATOR=not_present'}
-          $web='D:\home\site\wwwroot\Web.config'
-          if(Test-Path $web){(Get-Item $web).LastWriteTime=Get-Date}
+          $ErrorActionPreference='Continue'
+          $targets=@('C:\home\site\wwwroot\App_Code\PricingCalculator.cs','D:\home\site\wwwroot\App_Code\PricingCalculator.cs')
+          foreach($f in $targets){
+            if(Test-Path $f){
+              try{Remove-Item $f -Force -ErrorAction Stop;Write-Output ('STALE_REMOVE='+$f+'=removed')}catch{Write-Output ('STALE_REMOVE='+$f+'=failed:'+($_.Exception.Message -replace '[\r\n]+',' '))}
+            }else{Write-Output ('STALE_REMOVE='+$f+'=not_present')}
+          }
+          foreach($f in $targets){Write-Output ('STALE_EXISTS_AFTER='+$f+'='+[string](Test-Path $f))}
+          foreach($web in @('C:\home\site\wwwroot\Web.config','D:\home\site\wwwroot\Web.config')){if(Test-Path $web){(Get-Item $web).LastWriteTime=Get-Date}}
           '@
           $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($repair))
           $body=@{command="powershell -NoProfile -NonInteractive -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
           $r=Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers @{Authorization="Basic $basic"} -ContentType 'application/json' -Body $body -TimeoutSec 120
-          Write-Output $r.Output
+          $repairOutput=([string]$r.Output)+"`n"+([string]$r.Error)
+          Write-Output $repairOutput
+          $status=Join-Path $env:RUNNER_TEMP 'live-repair-status.txt'
+          $repairOutput -split "`r?`n" | Where-Object { $_ -match '^STALE_' } | Set-Content $status -Encoding ascii
           az webapp restart -g $env:RESOURCE_GROUP -n $env:WEB_APP --only-show-errors | Out-Null
           $url="https://$env:WEB_APP.azurewebsites.net/Login.aspx"
           $code=0
@@ -62,9 +69,8 @@ jobs:
             if($code -eq 200){break}
             Start-Sleep -Seconds 5
           }
-          $status=Join-Path $env:RUNNER_TEMP 'live-repair-status.txt'
-          "LOGIN_HTTP=$code" | Set-Content $status -Encoding ascii
-          if($code -eq 200){'LOGIN_OK=true' | Add-Content $status}else{'LOGIN_OK=false' | Add-Content $status}
+          Add-Content $status "LOGIN_HTTP=$code"
+          if($code -eq 200){Add-Content $status 'LOGIN_OK=true'}else{Add-Content $status 'LOGIN_OK=false'}
 
       - name: Capture safe recent ASP.NET errors from Kudu
         if: always()
@@ -79,18 +85,11 @@ jobs:
           $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
           $script=@'
           $ErrorActionPreference='Continue'
-          $files=@('D:\home\LogFiles\eventlog.xml','D:\home\LogFiles\DetailedErrors','D:\home\LogFiles\http\RawLogs')
+          $files=@('C:\home\LogFiles\eventlog.xml','D:\home\LogFiles\eventlog.xml','C:\home\LogFiles\DetailedErrors','D:\home\LogFiles\DetailedErrors')
           foreach($f in $files){
             if(Test-Path $f){
-              if((Get-Item $f).PSIsContainer){
-                Get-ChildItem $f -File -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 5 | ForEach-Object {
-                  Write-Output ('FILE='+$_.FullName)
-                  Get-Content $_.FullName -Tail 160 -ErrorAction SilentlyContinue
-                }
-              } else {
-                Write-Output ('FILE='+$f)
-                Get-Content $f -Tail 400 -ErrorAction SilentlyContinue
-              }
+              if((Get-Item $f).PSIsContainer){Get-ChildItem $f -File -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 3 | ForEach-Object {Write-Output ('FILE='+$_.FullName);Get-Content $_.FullName -Tail 120 -ErrorAction SilentlyContinue}}
+              else{Write-Output ('FILE='+$f);Get-Content $f -Tail 250 -ErrorAction SilentlyContinue}
             }
           }
           '@
@@ -98,8 +97,8 @@ jobs:
           $body=@{command="powershell -NoProfile -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
           $r=Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers @{Authorization="Basic $basic"} -ContentType 'application/json' -Body $body -TimeoutSec 120
           $text=([string]$r.Output)+"`n"+([string]$r.Error)
-          $lines=$text -split "`r?`n" | Where-Object { $_ -match '(?i)(exception|error|configuration|parser|could not load|assembly|web\.config|keyword not supported|connectionstring|line \d+|source file|stack trace|runtime error|CS\d{4})' }
-          $safe=($lines | Select-Object -Last 160) -join "`n"
+          $lines=$text -split "`r?`n" | Where-Object { $_ -match '(?i)(exception|error|configuration|parser|could not load|assembly|web\.config|keyword not supported|connectionstring|line \d+|source file|runtime error|CS\d{4})' }
+          $safe=($lines | Select-Object -Last 120) -join "`n"
           $safe=[regex]::Replace($safe,'(?i)(password|pwd)\s*=\s*[^;\s<]+','$1=***')
           $safe=[regex]::Replace($safe,'(?i)(user id|uid)\s*=\s*[^;\s<]+','$1=***')
           $safe=[regex]::Replace($safe,'sk-[A-Za-z0-9_-]{16,}','***')
