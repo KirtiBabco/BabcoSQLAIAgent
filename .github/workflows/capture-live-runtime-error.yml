@@ -21,7 +21,7 @@ env:
 jobs:
   capture:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: azure/login@v2
         with:
@@ -30,7 +30,41 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
+      - name: Repair stale App_Code file and verify Login
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
+          $p=@($profiles | Where-Object { $_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy' } | Select-Object -First 1)
+          if($p.Count -eq 0){ throw 'Publishing profile unavailable.' }
+          $u=[string]$p[0].userName; $pw=[string]$p[0].userPWD
+          Write-Output "::add-mask::$u";Write-Output "::add-mask::$pw"
+          $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
+          $repair=@'
+          $ErrorActionPreference='Stop'
+          $f='D:\home\site\wwwroot\App_Code\PricingCalculator.cs'
+          if(Test-Path $f){Remove-Item $f -Force;Write-Output 'STALE_PRICINGCALCULATOR=removed'}else{Write-Output 'STALE_PRICINGCALCULATOR=not_present'}
+          $web='D:\home\site\wwwroot\Web.config'
+          if(Test-Path $web){(Get-Item $web).LastWriteTime=Get-Date}
+          '@
+          $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($repair))
+          $body=@{command="powershell -NoProfile -NonInteractive -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
+          $r=Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers @{Authorization="Basic $basic"} -ContentType 'application/json' -Body $body -TimeoutSec 120
+          Write-Output $r.Output
+          az webapp restart -g $env:RESOURCE_GROUP -n $env:WEB_APP --only-show-errors | Out-Null
+          $url="https://$env:WEB_APP.azurewebsites.net/Login.aspx"
+          $code=0
+          for($i=1;$i -le 48;$i++){
+            try{$resp=Invoke-WebRequest -Uri $url -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 20;$code=[int]$resp.StatusCode}catch{$code=0}
+            if($code -eq 200){break}
+            Start-Sleep -Seconds 5
+          }
+          $status=Join-Path $env:RUNNER_TEMP 'live-repair-status.txt'
+          "LOGIN_HTTP=$code" | Set-Content $status -Encoding ascii
+          if($code -eq 200){'LOGIN_OK=true' | Add-Content $status}else{'LOGIN_OK=false' | Add-Content $status}
+
       - name: Capture safe recent ASP.NET errors from Kudu
+        if: always()
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -69,17 +103,27 @@ jobs:
           $out=Join-Path $env:RUNNER_TEMP 'live-error.txt'
           if([string]::IsNullOrWhiteSpace($safe)){$safe='NO_MATCHING_RUNTIME_ERROR_LINES_FOUND'}
           Set-Content $out $safe -Encoding utf8
-          Write-Output $safe
 
-      - name: Publish safe error report
+      - name: Publish safe repair and error report
         if: always()
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $d=Join-Path $env:RUNNER_TEMP 'pub';New-Item -ItemType Directory -Path $d -Force|Out-Null
-          $p=Join-Path $env:RUNNER_TEMP 'live-error.txt'
-          if(Test-Path $p){Copy-Item $p (Join-Path $d 'status.txt')}else{'CAPTURE_FAILED=true'|Set-Content (Join-Path $d 'status.txt')}
-          Add-Content (Join-Path $d 'status.txt') "SOURCE_COMMIT=$env:GITHUB_SHA"
-          Add-Content (Join-Path $d 'status.txt') "CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
-          Push-Location $d;git init|Out-Null;git checkout -b live-error-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish live runtime error'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin live-error-status|Out-Null;Pop-Location
+          $statusFile=Join-Path $d 'status.txt'
+          $repair=Join-Path $env:RUNNER_TEMP 'live-repair-status.txt'
+          if(Test-Path $repair){Get-Content $repair|Set-Content $statusFile -Encoding ascii}else{'LOGIN_HTTP=0'|Set-Content $statusFile -Encoding ascii;'LOGIN_OK=false'|Add-Content $statusFile}
+          $err=Join-Path $env:RUNNER_TEMP 'live-error.txt'
+          if(Test-Path $err){'ERROR_REPORT_BEGIN'|Add-Content $statusFile;Get-Content $err|Add-Content $statusFile;'ERROR_REPORT_END'|Add-Content $statusFile}
+          Add-Content $statusFile "SOURCE_COMMIT=$env:GITHUB_SHA"
+          Add-Content $statusFile "CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
+          Push-Location $d;git init|Out-Null;git checkout -b live-error-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish live repair status'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin live-error-status|Out-Null;Pop-Location
+
+      - name: Require Login restored
+        if: always()
+        shell: pwsh
+        run: |
+          $p=Join-Path $env:RUNNER_TEMP 'live-repair-status.txt'
+          if(-not(Test-Path $p)){throw 'Repair status missing.'}
+          if(-not((Get-Content $p) -match '^LOGIN_HTTP=200$')){throw 'Login is not healthy yet.'}
