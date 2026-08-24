@@ -44,7 +44,7 @@ jobs:
             cset=$(az webapp config connection-string list -g "$rg" -n "$app" -o json 2>/dev/null)
             VALUES_JSON="$(python3 - <<'PY' "$aset" "$cset"
 import json,sys
-keys={'BAP_SUPPORT_CONNECTION_STRING','SQL_BAP_SUPPORT_CONNECTION_STRING','SQL_CONNECTION_STRING','BABCOSUPPORTCONNECTIONSTRING','CONNECTIONSTRING','BABCOSUPPORTCONNECTIONSTRING'}
+keys={'BAP_SUPPORT_CONNECTION_STRING','SQL_BAP_SUPPORT_CONNECTION_STRING','SQL_CONNECTION_STRING','BABCOSUPPORTCONNECTIONSTRING','CONNECTIONSTRING'}
 out=[]
 for kind,raw in [('APPSETTING',sys.argv[1]),('CONNECTION',sys.argv[2])]:
     try:a=json.loads(raw or '[]')
