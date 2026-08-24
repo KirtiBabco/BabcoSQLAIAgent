@@ -1,2 +1,3 @@
-Trigger production verification after synchronizing app-babco-unloadcompare-0e27b0b7-260814:BabcoSupportConnectionString into BabcoSQLAIAgent.
-Final live verification after clean App_Code deployment commit 4691f409f14d35bc18ac207cfa33e215a0a0ced7.
+Trigger final runtime verification after direct current-source recovery.
+Current source ZIP SHA256=99d00cf14da4c30a2b7e787a90e9a4aeb9575136800c64fb1357df9fefd3ac7a.
+Login recovery verified HTTP 200.
