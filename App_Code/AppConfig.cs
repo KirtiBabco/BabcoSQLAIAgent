@@ -47,6 +47,10 @@ namespace SQL_AI_Agent
         private static string NormalizeSqlConnectionString(string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return "";
+            value = value.Trim();
+            value = Regex.Replace(value, @"(?i)^\s*ConnectionString\s*=\s*", "");
+            if (value.Length >= 2 && ((value[0] == '"' && value[value.Length - 1] == '"') || (value[0] == '\'' && value[value.Length - 1] == '\'')))
+                value = value.Substring(1, value.Length - 2).Trim();
             value = Regex.Replace(value, @"(?i)\bConnectTimeout\s*=", "Connect Timeout=");
             value = Regex.Replace(value, @"(?i)\bConnectionTimeout\s*=", "Connection Timeout=");
             return value.Trim();
