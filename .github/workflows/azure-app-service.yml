@@ -68,6 +68,21 @@ jobs:
             --only-show-errors | Out-Null
           Write-Host "GLOBAL_BABCO_CONNECTION=applied_normalized"
 
+      - name: Use current supplied source ZIP only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $current = Join-Path $env:GITHUB_WORKSPACE 'source-package\current-source.b64'
+          if(-not (Test-Path $current)){ throw 'Current source package is missing.' }
+          Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE 'source-package') -Filter 'part*.b64' | Remove-Item -Force
+          Copy-Item $current (Join-Path $env:GITHUB_WORKSPACE 'source-package\part01.b64') -Force
+          $bytes=[Convert]::FromBase64String((Get-Content $current -Raw).Trim())
+          $tmp=Join-Path $env:RUNNER_TEMP 'current-source.zip'
+          [IO.File]::WriteAllBytes($tmp,$bytes)
+          $sha=(Get-FileHash $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "CURRENT_SOURCE_SHA256=$sha"
+          if($sha -ne '99d00cf14da4c30a2b7e787a90e9a4aeb9575136800c64fb1357df9fefd3ac7a'){ throw 'Current source ZIP hash mismatch.' }
+
       - name: Remove old live App_Code before fresh deployment
         shell: pwsh
         run: |
@@ -94,7 +109,7 @@ jobs:
           $result=Invoke-RestMethod -Method Post -Uri $uri -Headers @{Authorization="Basic $basic"} -ContentType 'application/json' -Body $body -TimeoutSec 120
           Write-Host ([string]$result.Output)
 
-      - name: Deploy full source and require live SQL OpenAI Entra health
+      - name: Deploy current source and require live SQL OpenAI Entra health
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
