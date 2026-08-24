@@ -36,15 +36,25 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Mirror working Babco App Service connection-string secret
+      - name: Mirror actual working Babco setting from source App Service
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $status=Join-Path $env:RUNNER_TEMP 'recovery-status.txt'
           "SOURCE_COMMIT=$env:GITHUB_SHA" | Set-Content $status -Encoding ascii
           $cs=az webapp config connection-string list -g $env:RESOURCE_GROUP -n $env:SOURCE_APP --query "[?name=='$($env:SOURCE_CONNECTION_NAME)'].value | [0]" -o tsv --only-show-errors
-          if([string]::IsNullOrWhiteSpace($cs) -or $cs -eq 'null'){throw 'Working source BabcoSupportConnectionString not found.'}
+          $sourceKind='ConnectionString'
+          if([string]::IsNullOrWhiteSpace($cs) -or $cs -eq 'null'){
+            $cs=az webapp config appsettings list -g $env:RESOURCE_GROUP -n $env:SOURCE_APP --query "[?name=='$($env:SOURCE_CONNECTION_NAME)'].value | [0]" -o tsv --only-show-errors
+            $sourceKind='AppSetting'
+          }
+          if([string]::IsNullOrWhiteSpace($cs) -or $cs -eq 'null'){
+            $cs=az webapp config appsettings list -g $env:RESOURCE_GROUP -n $env:SOURCE_APP --query "[?name=='BAP_SUPPORT_CONNECTION_STRING'].value | [0]" -o tsv --only-show-errors
+            $sourceKind='BAP_APPSETTING'
+          }
+          if([string]::IsNullOrWhiteSpace($cs) -or $cs -eq 'null'){throw 'No working Babco SQL setting found on source App Service.'}
           Write-Output "::add-mask::$cs"
+          Add-Content $status "BABCO_SOURCE_KIND=$sourceKind"
           $cs=[regex]::Replace([string]$cs,'(?i)\bConnectTimeout\s*=','Connect Timeout=')
           $cs=[regex]::Replace([string]$cs,'(?i)\bConnectionTimeout\s*=','Connection Timeout=')
           $cs=[regex]::Replace([string]$cs,'(?i)(^|;)\s*Timeout\s*=','$1Connect Timeout=')
