@@ -18,6 +18,7 @@ namespace SQL_AI_Agent
     {
         public const string OpenAIApiKeyVariable = "OPENAI_API_KEY_DEVELOPMENT";
         public const string SqlConnectionVariable = "BAP_SUPPORT_CONNECTION_STRING";
+        public const string BabcoConnectionName = "BabcoSupportConnectionString";
 
         public static string OpenAIUrl { get { return Get("OpenAIUrl", "https://api.openai.com/v1/responses"); } }
 
@@ -66,7 +67,22 @@ namespace SQL_AI_Agent
 
         public static string SqlConnectionString
         {
-            get { return NormalizeSqlConnectionString(GetEnvironmentSecretInfo(SqlConnectionVariable).Value); }
+            get
+            {
+                string value = FirstEnvironmentValue(
+                    "SQLCONNSTR_" + BabcoConnectionName,
+                    "SQLAZURECONNSTR_" + BabcoConnectionName,
+                    "CUSTOMCONNSTR_" + BabcoConnectionName,
+                    SqlConnectionVariable,
+                    "SQL_BAP_SUPPORT_CONNECTION_STRING",
+                    "SQL_CONNECTION_STRING");
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    ConnectionStringSettings configured = ConfigurationManager.ConnectionStrings[BabcoConnectionName];
+                    if (configured != null) value = configured.ConnectionString;
+                }
+                return NormalizeSqlConnectionString(value);
+            }
         }
 
         public static int MaxRows { get { return GetInt("MaxRows", 200); } }
@@ -84,6 +100,16 @@ namespace SQL_AI_Agent
             if (value.Length == 0) return;
             foreach (string existing in values) if (string.Equals(existing, value, StringComparison.OrdinalIgnoreCase)) return;
             values.Add(value);
+        }
+
+        private static string FirstEnvironmentValue(params string[] names)
+        {
+            foreach (string name in names)
+            {
+                EnvironmentSecretInfo info = GetEnvironmentSecretInfo(name);
+                if (info.IsPresent) return info.Value;
+            }
+            return "";
         }
 
         private static EnvironmentSecretInfo GetEnvironmentSecretInfo(string name)
