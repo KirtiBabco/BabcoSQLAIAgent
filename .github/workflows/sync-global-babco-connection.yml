@@ -35,14 +35,19 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Apply global Babco connection and repair live App Service
+      - name: Apply actual working Babco setting and verify live App Service
         shell: bash
         run: |
           set -euo pipefail
           status="$RUNNER_TEMP/global-babco-status.txt"
           echo "SOURCE_COMMIT=$GITHUB_SHA" > "$status"
 
-          value="$(az webapp config connection-string list -g "$RESOURCE_GROUP" -n "$SOURCE_APP" --query "[?name=='$SOURCE_CONNECTION_NAME'].value | [0]" -o tsv --only-show-errors)"
+          value="$(az webapp config appsettings list -g "$RESOURCE_GROUP" -n "$SOURCE_APP" --query "[?name=='$SOURCE_CONNECTION_NAME'].value | [0]" -o tsv --only-show-errors)"
+          source_kind="AppSetting"
+          if [ -z "$value" ] || [ "$value" = "null" ]; then
+            value="$(az webapp config connection-string list -g "$RESOURCE_GROUP" -n "$SOURCE_APP" --query "[?name=='$SOURCE_CONNECTION_NAME'].value | [0]" -o tsv --only-show-errors)"
+            source_kind="ConnectionString"
+          fi
           if [ -z "$value" ] || [ "$value" = "null" ]; then
             echo "GLOBAL_BABCO_SOURCE_FOUND=false" >> "$status"
             echo "SYNC=failure" >> "$status"
@@ -62,7 +67,7 @@ PY
           echo "::add-mask::$normalized"
           echo "GLOBAL_BABCO_SOURCE_FOUND=true" >> "$status"
           echo "GLOBAL_BABCO_SOURCE=$SOURCE_APP:$SOURCE_CONNECTION_NAME" >> "$status"
-          echo "SQL_KEYWORDS_NORMALIZED=true" >> "$status"
+          echo "GLOBAL_BABCO_SOURCE_KIND=$source_kind" >> "$status"
 
           az webapp config appsettings set -g "$RESOURCE_GROUP" -n "$TARGET_APP" --settings \
             "BAP_SUPPORT_CONNECTION_STRING=$normalized" \
@@ -73,21 +78,17 @@ PY
           profiles="$(az webapp deployment list-publishing-profiles -g "$RESOURCE_GROUP" -n "$TARGET_APP" -o json --only-show-errors)"
           user="$(jq -r '[.[] | select(.publishMethod=="MSDeploy" or .publishMethod=="ZipDeploy")][0].userName // empty' <<< "$profiles")"
           pass="$(jq -r '[.[] | select(.publishMethod=="MSDeploy" or .publishMethod=="ZipDeploy")][0].userPWD // empty' <<< "$profiles")"
-          if [ -z "$user" ] || [ -z "$pass" ]; then
-            echo "KUDU_CREDENTIALS=false" >> "$status"
-            exit 1
-          fi
-          echo "::add-mask::$user"
-          echo "::add-mask::$pass"
-          echo "KUDU_CREDENTIALS=true" >> "$status"
+          if [ -z "$user" ] || [ -z "$pass" ]; then echo "KUDU_CREDENTIALS=false" >> "$status"; exit 1; fi
+          echo "::add-mask::$user"; echo "::add-mask::$pass"; echo "KUDU_CREDENTIALS=true" >> "$status"
 
           az webapp restart -g "$RESOURCE_GROUP" -n "$TARGET_APP" --only-show-errors >/dev/null
+          sleep 15
           echo "SYNC=success" >> "$status"
 
           login_code=0
-          for i in $(seq 1 48); do
+          for i in $(seq 1 30); do
             login_code="$(curl -k -L -sS -o "$RUNNER_TEMP/login.html" -w '%{http_code}' --max-time 25 "https://${TARGET_APP}.azurewebsites.net/Login.aspx" || true)"
-            if [ "$login_code" = "200" ]; then break; fi
+            [ "$login_code" = "200" ] && break
             sleep 5
           done
           echo "LOGIN_HTTP=$login_code" >> "$status"
@@ -95,17 +96,17 @@ PY
           entra_code="$(curl -k -sS -o /dev/null -w '%{http_code}' --max-time 25 "https://${TARGET_APP}.azurewebsites.net/.auth/login/aad" || true)"
           echo "ENTRA_HTTP=$entra_code" >> "$status"
 
-          sqlcmd='$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Data; $cs=[Environment]::GetEnvironmentVariable("BAP_SUPPORT_CONNECTION_STRING"); $cs=[regex]::Replace($cs,"(?i)\\bConnectTimeout\\s*=","Connect Timeout="); $cs=[regex]::Replace($cs,"(?i)\\bConnectionTimeout\\s*=","Connection Timeout="); $cs=[regex]::Replace($cs,"(?i)(^|;)\\s*Timeout\\s*=","$1Connect Timeout="); try{$b=New-Object System.Data.SqlClient.SqlConnectionStringBuilder($cs); $b.ConnectTimeout=12; $c=New-Object System.Data.SqlClient.SqlConnection($b.ConnectionString); $c.Open(); $q=$c.CreateCommand(); $q.CommandTimeout=12; $q.CommandText="SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES"; $n=$q.ExecuteScalar(); $c.Close(); Write-Output "SQL_OK=true"; Write-Output "SQL_TABLE_COUNT=$n"; Write-Output ("SQL_SERVER_HOST="+$b.DataSource)}catch{Write-Output "SQL_OK=false"; Write-Output ("SQL_ERROR_TYPE="+$_.Exception.GetType().Name); Write-Output ("SQL_ERROR="+($_.Exception.Message -replace "[\\r\\n]+"," "))}'
+          sqlcmd='$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Data; $cs=[Environment]::GetEnvironmentVariable("BAP_SUPPORT_CONNECTION_STRING"); try{$b=New-Object System.Data.SqlClient.SqlConnectionStringBuilder($cs); $b.ConnectTimeout=12; $c=New-Object System.Data.SqlClient.SqlConnection($b.ConnectionString); $c.Open(); $q=$c.CreateCommand(); $q.CommandTimeout=12; $q.CommandText="SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES"; $n=$q.ExecuteScalar(); $c.Close(); Write-Output "SQL_OK=true"; Write-Output "SQL_TABLE_COUNT=$n"; Write-Output ("SQL_SERVER_HOST="+$b.DataSource)}catch{Write-Output "SQL_OK=false"; Write-Output ("SQL_ERROR_TYPE="+$_.Exception.GetType().Name); Write-Output ("SQL_ERROR="+($_.Exception.Message -replace "[\\r\\n]+"," "))}'
           sqlbody="$(jq -nc --arg c "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $sqlcmd" '{command:$c,dir:"site\\wwwroot"}')"
           sqlres="$(curl -fsS --retry 2 --retry-delay 3 -u "$user:$pass" -H 'Content-Type: application/json' -d "$sqlbody" "https://${TARGET_APP}.scm.azurewebsites.net/api/command")"
           jq -r '.Output // empty' <<< "$sqlres" | grep -E '^SQL_' >> "$status" || true
 
-          openaicmd='$ErrorActionPreference="Stop"; $k=[Environment]::GetEnvironmentVariable("OPENAI_API_KEY_DEVELOPMENT"); if([string]::IsNullOrWhiteSpace($k)){Write-Output "OPENAI_OK=false";exit}; try{$p=@{model="gpt-5-mini";input="Reply only OK";max_output_tokens=16}|ConvertTo-Json -Compress; $r=Invoke-WebRequest -Method Post -Uri "https://api.openai.com/v1/responses" -Headers @{Authorization=("Bearer "+$k)} -ContentType "application/json" -Body $p -UseBasicParsing -TimeoutSec 30; Write-Output "OPENAI_OK=true"; Write-Output ("OPENAI_HTTP="+[int]$r.StatusCode)}catch{$code=0;try{$code=[int]$_.Exception.Response.StatusCode}catch{};Write-Output "OPENAI_OK=false";Write-Output ("OPENAI_HTTP="+$code)}'
+          openaicmd='$ErrorActionPreference="Stop"; $k=[Environment]::GetEnvironmentVariable("OPENAI_API_KEY_DEVELOPMENT"); if([string]::IsNullOrWhiteSpace($k)){Write-Output "OPENAI_OK=false";exit}; try{$p=@{model="gpt-5-mini";input="Reply only OK";max_output_tokens=16}|ConvertTo-Json -Compress; $r=Invoke-WebRequest -Method Post -Uri "https://api.openai.com/v1/responses" -Headers @{Authorization=("Bearer "+$k)} -ContentType "application/json" -Body $p -UseBasicParsing -TimeoutSec 30; Write-Output "OPENAI_OK=true"; Write-Output ("OPENAI_HTTP="+[int]$r.StatusCode)}catch{Write-Output "OPENAI_OK=false"}'
           openaibody="$(jq -nc --arg c "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $openaicmd" '{command:$c,dir:"site\\wwwroot"}')"
           openaires="$(curl -fsS --retry 2 --retry-delay 3 -u "$user:$pass" -H 'Content-Type: application/json' -d "$openaibody" "https://${TARGET_APP}.scm.azurewebsites.net/api/command")"
           jq -r '.Output // empty' <<< "$openaires" | grep -E '^OPENAI_' >> "$status" || true
 
-          if [ "$login_code" = "200" ]; then echo "SITE_OK=true" >> "$status"; else echo "SITE_OK=false" >> "$status"; fi
+          if [ "$login_code" = "200" ] && grep -q '^SQL_OK=true$' "$status" && grep -q '^OPENAI_OK=true$' "$status"; then echo "VERIFY=success" >> "$status"; else echo "VERIFY=failure" >> "$status"; fi
           echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$status"
 
       - name: Publish safe sync status
@@ -115,17 +116,13 @@ PY
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          d="$RUNNER_TEMP/global-babco-publish"
-          mkdir -p "$d"
+          d="$RUNNER_TEMP/global-babco-publish"; mkdir -p "$d"
           p="$RUNNER_TEMP/global-babco-status.txt"
           if [ -f "$p" ]; then cp "$p" "$d/status.txt"; else echo 'SYNC_RUN_FAILED=true' > "$d/status.txt"; fi
           cd "$d"
-          git init -q
-          git checkout -q -b global-babco-status
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add status.txt
-          git commit -q -m 'Publish final live repair status'
+          git init -q; git checkout -q -b global-babco-status
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt; git commit -q -m 'Publish final live repair status'
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin global-babco-status >/dev/null
 
@@ -134,7 +131,4 @@ PY
         run: |
           set -euo pipefail
           p="$RUNNER_TEMP/global-babco-status.txt"
-          grep -q '^LOGIN_HTTP=200$' "$p"
-          grep -q '^SITE_OK=true$' "$p"
-          grep -q '^SQL_OK=true$' "$p"
-          grep -q '^OPENAI_OK=true$' "$p"
+          grep -q '^VERIFY=success$' "$p"
