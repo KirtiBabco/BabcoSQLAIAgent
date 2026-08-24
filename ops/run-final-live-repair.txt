@@ -1,2 +1,1 @@
-Run final live repair: normalize global Babco connection, remove stale PricingCalculator.cs, restart App Service, verify Login, Entra, SQL, and OpenAI.
-Trigger source: PR merge to main at 2026-08-24 14:21 IST.
+Run final runtime-only sync from app-babco-unloadcompare-0e27b0b7-260818 BabcoSupportConnectionString AppSetting into BabcoSQLAIAgent, restart, and require SQL/OpenAI/Login/Entra PASS.
