@@ -36,10 +36,7 @@ namespace SQL_AI_Agent
             }
         }
 
-        public static EnvironmentSecretInfo GetOpenAIApiKeyInfo()
-        {
-            return GetEnvironmentSecretInfo(OpenAIApiKeyVariable);
-        }
+        public static EnvironmentSecretInfo GetOpenAIApiKeyInfo() { return GetEnvironmentSecretInfo(OpenAIApiKeyVariable); }
 
         public static string OpenAIModel
         {
@@ -69,17 +66,12 @@ namespace SQL_AI_Agent
 
         public static string SqlConnectionString
         {
-            get
-            {
-                string value = GetEnvironmentSecretInfo(SqlConnectionVariable).Value;
-                return NormalizeSqlConnectionString(value);
-            }
+            get { return NormalizeSqlConnectionString(GetEnvironmentSecretInfo(SqlConnectionVariable).Value); }
         }
 
         public static int MaxRows { get { return GetInt("MaxRows", 200); } }
         public static int CommandTimeoutSeconds { get { return GetInt("CommandTimeoutSeconds", 30); } }
         public static string AdminEmails { get { return GetEnvironmentOrConfig("AI_SQL_AGENT_ADMIN_EMAILS", "AdminEmails"); } }
-
         public static decimal OpenAIInputPricePer1M { get { return GetDecimal("OpenAIInputPricePer1M", -1m); } }
         public static decimal OpenAICachedInputPricePer1M { get { return GetDecimal("OpenAICachedInputPricePer1M", -1m); } }
         public static decimal OpenAIOutputPricePer1M { get { return GetDecimal("OpenAIOutputPricePer1M", -1m); } }
@@ -90,8 +82,7 @@ namespace SQL_AI_Agent
         {
             value = (value ?? "").Trim();
             if (value.Length == 0) return;
-            foreach (string existing in values)
-                if (string.Equals(existing, value, StringComparison.OrdinalIgnoreCase)) return;
+            foreach (string existing in values) if (string.Equals(existing, value, StringComparison.OrdinalIgnoreCase)) return;
             values.Add(value);
         }
 
@@ -108,8 +99,7 @@ namespace SQL_AI_Agent
 
         private static string SafeGetEnvironmentVariable(string name, EnvironmentVariableTarget target)
         {
-            try { return Environment.GetEnvironmentVariable(name, target); }
-            catch { return ""; }
+            try { return Environment.GetEnvironmentVariable(name, target); } catch { return ""; }
         }
 
         private static string NormalizeSecretValue(string name, string value)
@@ -127,16 +117,13 @@ namespace SQL_AI_Agent
         {
             if (string.IsNullOrWhiteSpace(value)) return "";
             value = value.Trim();
-
-            // Azure/shared configuration can accidentally store a copied wrapper such as
-            // ConnectionString=Server=...; System.Data.SqlClient treats that wrapper as an invalid keyword.
+            value = Regex.Replace(value, @"(?i)^\s*BAP_SUPPORT_CONNECTION_STRING\s*=\s*", "");
             value = Regex.Replace(value, @"(?i)^\s*ConnectionString\s*=\s*", "");
             if (value.Length >= 2 && ((value[0] == '"' && value[value.Length - 1] == '"') || (value[0] == '\'' && value[value.Length - 1] == '\'')))
                 value = value.Substring(1, value.Length - 2).Trim();
-
-            // Normalize compact timeout aliases before SqlConnection parses the value.
             value = Regex.Replace(value, @"(?i)\bConnectTimeout\s*=", "Connect Timeout=");
             value = Regex.Replace(value, @"(?i)\bConnectionTimeout\s*=", "Connection Timeout=");
+            value = Regex.Replace(value, @"(?i)(^|;)\s*Timeout\s*=", "$1Connect Timeout=");
             return value.Trim();
         }
 
@@ -151,32 +138,11 @@ namespace SQL_AI_Agent
         private static string GetEnvironmentOrConfig(string environmentName, string configKey)
         {
             EnvironmentSecretInfo info = GetEnvironmentSecretInfo(environmentName);
-            if (info.IsPresent) return info.Value;
-            return Get(configKey, "");
+            return info.IsPresent ? info.Value : Get(configKey, "");
         }
-
-        private static string Get(string key, string fallback)
-        {
-            string value = ConfigurationManager.AppSettings[key];
-            return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
-        }
-
-        private static int GetInt(string key, int fallback)
-        {
-            int value;
-            return int.TryParse(Get(key, fallback.ToString(CultureInfo.InvariantCulture)), out value) ? value : fallback;
-        }
-
-        private static bool GetBool(string key, bool fallback)
-        {
-            bool value;
-            return bool.TryParse(Get(key, fallback.ToString()), out value) ? value : fallback;
-        }
-
-        private static decimal GetDecimal(string key, decimal fallback)
-        {
-            decimal value;
-            return decimal.TryParse(Get(key, fallback.ToString(CultureInfo.InvariantCulture)), NumberStyles.Any, CultureInfo.InvariantCulture, out value) ? value : fallback;
-        }
+        private static string Get(string key, string fallback) { string value = ConfigurationManager.AppSettings[key]; return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim(); }
+        private static int GetInt(string key, int fallback) { int value; return int.TryParse(Get(key, fallback.ToString(CultureInfo.InvariantCulture)), out value) ? value : fallback; }
+        private static bool GetBool(string key, bool fallback) { bool value; return bool.TryParse(Get(key, fallback.ToString()), out value) ? value : fallback; }
+        private static decimal GetDecimal(string key, decimal fallback) { decimal value; return decimal.TryParse(Get(key, fallback.ToString(CultureInfo.InvariantCulture)), NumberStyles.Any, CultureInfo.InvariantCulture, out value) ? value : fallback; }
     }
 }
