@@ -1,5 +1,6 @@
 using System;
 using System.Configuration;
+using System.Text.RegularExpressions;
 
 namespace SQL_AI_Agent
 {
@@ -20,7 +21,14 @@ namespace SQL_AI_Agent
             }
         }
 
-        public static string OpenAIModel { get { return GetEnvironment("OPENAI_MODEL", Get("OpenAIModel", "gpt-5-mini")); } }
+        public static string OpenAIModel
+        {
+            get
+            {
+                string model = GetEnvironment("OPENAI_MODEL");
+                return string.IsNullOrWhiteSpace(model) ? Get("OpenAIModel", "gpt-5-mini") : model.Trim();
+            }
+        }
 
         public static string SqlConnectionString
         {
@@ -29,12 +37,20 @@ namespace SQL_AI_Agent
                 string value = GetEnvironment("BAP_SUPPORT_CONNECTION_STRING");
                 if (string.IsNullOrWhiteSpace(value))
                     value = Get("SqlConnectionString", "");
-                return value;
+                return NormalizeSqlConnectionString(value);
             }
         }
 
         public static int MaxRows { get { int v; return int.TryParse(Get("MaxRows", "200"), out v) ? v : 200; } }
         public static int CommandTimeoutSeconds { get { int v; return int.TryParse(Get("CommandTimeoutSeconds", "30"), out v) ? v : 30; } }
+
+        private static string NormalizeSqlConnectionString(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "";
+            value = Regex.Replace(value, @"(?i)(^|;)\s*ConnectTimeout\s*=", "$1Connect Timeout=");
+            value = Regex.Replace(value, @"(?i)(^|;)\s*ConnectionTimeout\s*=", "$1Connection Timeout=");
+            return value.Trim();
+        }
 
         private static string GetEnvironment(string key, string fallback = "")
         {
