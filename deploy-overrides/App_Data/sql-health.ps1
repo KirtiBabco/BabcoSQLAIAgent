@@ -107,9 +107,12 @@ try{
   }elseif((-not $hasInstance) -and $spec.Contains(',')){
     $hp=$spec.Split(',',2);$hostPart=$hp[0];[int]::TryParse($hp[1],[ref]$explicitPort)|Out-Null
   }
+  $hostPart=$hostPart.Trim()
+  OutSafe 'SQL_SERVER_HOST' $hostPart
+  if($hasInstance){OutSafe 'SQL_INSTANCE_NAME' $instanceName}else{OutSafe 'SQL_INSTANCE_NAME' ''}
   OutSafe 'SQL_EXPLICIT_PORT' ($(if($explicitPort -gt 0){$explicitPort}else{''}))
 
-  $hostLower=$hostPart.Trim().ToLowerInvariant()
+  $hostLower=$hostPart.ToLowerInvariant()
   OutSafe 'SQL_SERVER_KIND' ($(if($hostLower.EndsWith('.database.windows.net')){'AZURE_SQL'}else{'SQL_SERVER'}))
   OutSafe 'SQL_DATABASE_PRESENT' (-not [string]::IsNullOrWhiteSpace([string]$builder.InitialCatalog))
 
@@ -118,9 +121,14 @@ try{
   if($isLiteral){OutSafe 'SQL_SERVER_ADDRESS_TYPE' ($(if(IsPrivateIp $ipObj){'PRIVATE_IP'}else{'PUBLIC_IP'}))}
   else{OutSafe 'SQL_SERVER_ADDRESS_TYPE' 'HOSTNAME'}
 
-  $dnsOk=$false;$resolved=@()
-  try{$resolved=@([System.Net.Dns]::GetHostAddresses($hostPart));$dnsOk=$resolved.Count -gt 0}catch{}
+  $dnsOk=$false;$resolved=@();$dnsError=''
+  try{$resolved=@([System.Net.Dns]::GetHostAddresses($hostPart));$dnsOk=$resolved.Count -gt 0}catch{$dnsError=$_.Exception.GetType().Name}
   OutSafe 'SQL_DNS_OK' $dnsOk.ToString().ToLowerInvariant()
+  OutSafe 'SQL_DNS_ERROR_TYPE' $dnsError
+  if($dnsOk){
+    $safeIps=@($resolved | ForEach-Object {$_.IPAddressToString} | Select-Object -Unique)
+    OutSafe 'SQL_RESOLVED_IPS' ($safeIps -join ',')
+  }
   if($dnsOk -and -not $isLiteral){
     $hasPrivate=$false;foreach($addr in $resolved){if(IsPrivateIp $addr){$hasPrivate=$true;break}}
     OutSafe 'SQL_DNS_SCOPE' ($(if($hasPrivate){'PRIVATE_OR_MIXED'}else{'PUBLIC'}))
