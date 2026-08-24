@@ -1,0 +1,1 @@
+Run targeted cleanup of stale App_Code/PricingCalculator.cs and require Login.aspx HTTP 200.
