@@ -1,0 +1,80 @@
+name: Sync Global Babco Connection
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sync-global-babco-connection.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RESOURCE_GROUP: 'rg-babco-rnd-sandbox'
+  TARGET_APP: 'babco-sqlagent-wf-2c606af4'
+  SOURCE_APP: 'app-babco-unloadcompare-0e27b0b7-260814'
+  SOURCE_CONNECTION_NAME: 'BabcoSupportConnectionString'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Apply established global Babco connection
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$RUNNER_TEMP/global-babco-status.txt"
+          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$status"
+          value="$(az webapp config connection-string list -g "$RESOURCE_GROUP" -n "$SOURCE_APP" --query "[?name=='$SOURCE_CONNECTION_NAME'].value | [0]" -o tsv --only-show-errors)"
+          if [ -z "$value" ] || [ "$value" = "null" ]; then
+            echo "GLOBAL_BABCO_SOURCE_FOUND=false" >> "$status"
+            echo "SYNC=failure" >> "$status"
+            cat "$status"
+            exit 1
+          fi
+          echo "::add-mask::$value"
+          echo "GLOBAL_BABCO_SOURCE_FOUND=true" >> "$status"
+          echo "GLOBAL_BABCO_SOURCE=$SOURCE_APP:$SOURCE_CONNECTION_NAME" >> "$status"
+          az webapp config appsettings set -g "$RESOURCE_GROUP" -n "$TARGET_APP" --settings \
+            "BAP_SUPPORT_CONNECTION_STRING=$value" \
+            "SQL_BAP_SUPPORT_CONNECTION_STRING=$value" \
+            "SQL_CONNECTION_STRING=$value" \
+            --only-show-errors >/dev/null
+          az webapp restart -g "$RESOURCE_GROUP" -n "$TARGET_APP" --only-show-errors >/dev/null
+          echo "SYNC=success" >> "$status"
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$status"
+          cat "$status"
+
+      - name: Publish safe sync status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/global-babco-publish"
+          mkdir -p "$d"
+          p="$RUNNER_TEMP/global-babco-status.txt"
+          if [ -f "$p" ]; then cp "$p" "$d/status.txt"; else echo 'SYNC_RUN_FAILED=true' > "$d/status.txt"; fi
+          cd "$d"
+          git init -q
+          git checkout -q -b global-babco-status
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt
+          git commit -q -m 'Publish global Babco connection sync status'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin global-babco-status >/dev/null
