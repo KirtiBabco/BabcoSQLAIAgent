@@ -1,0 +1,97 @@
+name: Runtime Diagnostics
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: 7a21e1b8-ee78-429e-8051-5dce354e3e1d
+  AZURE_TENANT_ID: 7e3bfe8e-acb5-4e0e-9798-c05331d2940c
+  AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
+  AZURE_RESOURCE_GROUP: rg-babco-rnd-sandbox
+  WEB_APP: babco-sqlagent-wf-2c606af4
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Run diagnostics inside App Service through Kudu
+        id: diag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $token=az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv
+          Write-Output "::add-mask::$token"
+
+          $script=@'
+          $ErrorActionPreference='Continue'
+          function OutSafe([string]$k,[object]$v){ Write-Output ($k+'='+[string]$v) }
+
+          $cs=[Environment]::GetEnvironmentVariable('BAP_SUPPORT_CONNECTION_STRING')
+          OutSafe 'SQL_SETTING_PRESENT' (-not [string]::IsNullOrWhiteSpace($cs))
+          try {
+            Add-Type -AssemblyName System.Data
+            $b=New-Object System.Data.SqlClient.SqlConnectionStringBuilder($cs)
+            $b.ConnectTimeout=10
+            $sw=[Diagnostics.Stopwatch]::StartNew()
+            $c=New-Object System.Data.SqlClient.SqlConnection($b.ConnectionString)
+            $c.Open()
+            $cmd=$c.CreateCommand();$cmd.CommandTimeout=10;$cmd.CommandText='SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES'
+            $tables=$cmd.ExecuteScalar()
+            $c.Close();$sw.Stop()
+            OutSafe 'SQL_OK' 'true';OutSafe 'SQL_TABLE_COUNT' $tables;OutSafe 'SQL_MS' $sw.ElapsedMilliseconds
+          } catch {
+            OutSafe 'SQL_OK' 'false';OutSafe 'SQL_ERROR_TYPE' $_.Exception.GetType().Name;OutSafe 'SQL_ERROR' ($_.Exception.Message -replace '[\r\n]+',' ')
+          }
+
+          $key=[Environment]::GetEnvironmentVariable('OPENAI_API_KEY_DEVELOPMENT')
+          if([string]::IsNullOrWhiteSpace($key)){$key=[Environment]::GetEnvironmentVariable('OPENAI_API_KEY')}
+          OutSafe 'OPENAI_KEY_PRESENT' (-not [string]::IsNullOrWhiteSpace($key))
+          $url=[Environment]::GetEnvironmentVariable('OpenAIUrl');if([string]::IsNullOrWhiteSpace($url)){$url='https://api.openai.com/v1/responses'}
+          $model=[Environment]::GetEnvironmentVariable('OPENAI_MODEL');if([string]::IsNullOrWhiteSpace($model)){$model='gpt-5-mini'}
+          if(-not [string]::IsNullOrWhiteSpace($key)){
+            try {
+              $payload=@{model=$model;input='Reply only OK';max_output_tokens=8}|ConvertTo-Json -Compress
+              $sw=[Diagnostics.Stopwatch]::StartNew()
+              $r=Invoke-WebRequest -Method Post -Uri $url -Headers @{Authorization=('Bearer '+$key)} -ContentType 'application/json' -Body $payload -UseBasicParsing -TimeoutSec 25
+              $sw.Stop();OutSafe 'OPENAI_OK' ([int]$r.StatusCode -ge 200 -and [int]$r.StatusCode -lt 300);OutSafe 'OPENAI_HTTP' ([int]$r.StatusCode);OutSafe 'OPENAI_MS' $sw.ElapsedMilliseconds
+            } catch {
+              $status='';try{$status=[int]$_.Exception.Response.StatusCode}catch{}
+              OutSafe 'OPENAI_OK' 'false';OutSafe 'OPENAI_HTTP' $status;OutSafe 'OPENAI_ERROR_TYPE' $_.Exception.GetType().Name;OutSafe 'OPENAI_ERROR' ($_.Exception.Message -replace '[\r\n]+',' ')
+            }
+          } else { OutSafe 'OPENAI_OK' 'false';OutSafe 'OPENAI_ERROR' 'No server-side OpenAI API key configured.' }
+          '@
+          $bytes=[Text.Encoding]::Unicode.GetBytes($script);$encoded=[Convert]::ToBase64String($bytes)
+          $body=@{command="powershell -NoProfile -EncodedCommand $encoded";dir='site\\wwwroot'}|ConvertTo-Json -Compress
+          $uri="https://$env:WEB_APP.scm.azurewebsites.net/api/command"
+          $r=Invoke-RestMethod -Method Post -Uri $uri -Headers @{Authorization="Bearer $token"} -ContentType 'application/json' -Body $body -TimeoutSec 120
+          $out=[string]$r.Output
+          $safe=$out -split "`r?`n" | Where-Object { $_ -match '^(SQL_|OPENAI_)' }
+          $safe | Set-Content (Join-Path $env:RUNNER_TEMP 'runtime-status.txt') -Encoding ascii
+          $safe | ForEach-Object { Write-Output $_ }
+
+      - name: Publish safe runtime diagnostic status
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $d=Join-Path $env:RUNNER_TEMP 'runtime-publish';New-Item -ItemType Directory -Path $d -Force|Out-Null
+          $p=Join-Path $env:RUNNER_TEMP 'runtime-status.txt'
+          if(Test-Path $p){Get-Content $p|Set-Content (Join-Path $d 'status.txt') -Encoding ascii}else{'DIAGNOSTIC_RUN_FAILED=true'|Set-Content (Join-Path $d 'status.txt') -Encoding ascii}
+          Add-Content (Join-Path $d 'status.txt') "SOURCE_COMMIT=$env:GITHUB_SHA"
+          Add-Content (Join-Path $d 'status.txt') "CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
+          Push-Location $d;git init|Out-Null;git checkout -b runtime-diagnostics-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish runtime diagnostics'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin runtime-diagnostics-status|Out-Null;Pop-Location
