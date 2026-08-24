@@ -69,34 +69,50 @@ jobs:
           "DEPLOY_ZIP=$deployZip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Add-Content $status 'PACKAGE_VALID=true'
 
-      - name: Remove old live App_Code and deploy current package
+      - name: Direct Kudu deploy current package
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $status=Join-Path $env:RUNNER_TEMP 'recovery-status.txt'
-          $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
-          $p=@($profiles | Where-Object { $_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy' } | Select-Object -First 1)
-          if($p.Count -eq 0){throw 'Publishing profile unavailable.'}
-          $u=[string]$p[0].userName;$pw=[string]$p[0].userPWD
-          Write-Output "::add-mask::$u";Write-Output "::add-mask::$pw"
-          $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
-          $clean=@'
-          $ErrorActionPreference='Continue'
-          foreach($d in @('C:\home\site\wwwroot\App_Code','D:\home\site\wwwroot\App_Code')){if(Test-Path $d){Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue}}
-          Write-Output 'APP_CODE_PRE_CLEAN=true'
-          '@
-          $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($clean))
-          $body=@{command="powershell -NoProfile -NonInteractive -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
-          Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers @{Authorization="Basic $basic"} -ContentType 'application/json' -Body $body -TimeoutSec 120 | Out-Null
-          az webapp deploy -g $env:RESOURCE_GROUP -n $env:WEB_APP --src-path $env:DEPLOY_ZIP --type zip --clean true --restart true --only-show-errors | Out-Null
-          if($LASTEXITCODE -ne 0){throw 'Current package deployment failed.'}
-          Add-Content $status 'DEPLOY=success'
-          az webapp restart -g $env:RESOURCE_GROUP -n $env:WEB_APP --only-show-errors | Out-Null
+          try {
+            $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
+            $p=@($profiles | Where-Object { $_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy' } | Select-Object -First 1)
+            if($p.Count -eq 0){throw 'Publishing profile unavailable.'}
+            $u=[string]$p[0].userName;$pw=[string]$p[0].userPWD
+            Write-Output "::add-mask::$u";Write-Output "::add-mask::$pw"
+            $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
+            $headers=@{Authorization="Basic $basic"}
+
+            $clean=@'
+            $ErrorActionPreference='Continue'
+            foreach($d in @('C:\home\site\wwwroot\App_Code','D:\home\site\wwwroot\App_Code')){if(Test-Path $d){Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue}}
+            Write-Output 'APP_CODE_PRE_CLEAN=true'
+            '@
+            $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($clean))
+            $body=@{command="powershell -NoProfile -NonInteractive -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
+            $cleanResult=Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 120
+            Add-Content $status 'APP_CODE_PRE_CLEAN=true'
+
+            $deployUri="https://$env:WEB_APP.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
+            $response=Invoke-WebRequest -Method Post -Uri $deployUri -Headers $headers -InFile $env:DEPLOY_ZIP -ContentType 'application/zip' -UseBasicParsing -TimeoutSec 600
+            Add-Content $status "KUDU_DEPLOY_HTTP=$([int]$response.StatusCode)"
+            if([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300){throw "Kudu zipdeploy HTTP $([int]$response.StatusCode)"}
+            Add-Content $status 'DEPLOY=success'
+            az webapp restart -g $env:RESOURCE_GROUP -n $env:WEB_APP --only-show-errors | Out-Null
+            Add-Content $status 'RESTART=success'
+          } catch {
+            Add-Content $status 'DEPLOY=failure'
+            Add-Content $status ("DEPLOY_ERROR_TYPE="+$_.Exception.GetType().Name)
+            Add-Content $status ("DEPLOY_ERROR="+(($_.Exception.Message) -replace '[\r\n]+',' '))
+            throw
+          }
 
       - name: Verify Login and Entra
+        if: always()
         shell: pwsh
         run: |
           $status=Join-Path $env:RUNNER_TEMP 'recovery-status.txt'
+          if(-not(Test-Path $status)){"SOURCE_COMMIT=$env:GITHUB_SHA"|Set-Content $status -Encoding ascii}
           $loginCode=0
           for($i=1;$i -le 50;$i++){
             try{$r=Invoke-WebRequest -Uri $env:LOGIN_URL -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 20;$loginCode=[int]$r.StatusCode}catch{$loginCode=0}
@@ -122,6 +138,7 @@ jobs:
           Push-Location $d;git init|Out-Null;git checkout -b current-source-recovery-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish current source recovery status'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin current-source-recovery-status|Out-Null;Pop-Location
 
       - name: Require live Login
+        if: always()
         shell: pwsh
         run: |
           $p=Join-Path $env:RUNNER_TEMP 'recovery-status.txt'
