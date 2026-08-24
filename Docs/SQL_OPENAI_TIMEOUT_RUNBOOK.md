@@ -1,99 +1,189 @@
 # SQL AI Agent - SQL/OpenAI Timeout Runbook
 
-## Incident fixed
+## Purpose
 
-Observed UI error:
+This runbook prevents a repeat of the live error:
 
 `500 - The request timed out.`
 
-The browser error alone did not identify the failing layer. Live Azure diagnostics isolated the backend and found two SQL connection-string formatting problems in sequence:
+A browser-side 500/timeout is only a symptom. Never label it SQL or OpenAI until Auth, SQL and OpenAI are tested independently from the same Azure App Service worker that runs the Web Forms application.
 
-1. `Keyword not supported: 'ConnectTimeout'.`
-2. `Keyword not supported: 'ConnectionString'.`
+## Confirmed findings from this incident
 
-`BAP_SUPPORT_CONNECTION_STRING` existed, but a shared/copied value can contain either of these incompatible forms:
+1. Microsoft Entra / Azure App Service Easy Auth was healthy.
+2. `OPENAI_API_KEY_DEVELOPMENT` was present and an independent live OpenAI `/v1/responses` test returned HTTP 200.
+3. `BAP_SUPPORT_CONNECTION_STRING` was present.
+4. Safe key-name inspection showed a real SQL-style value with keys such as:
+   - `Data Source`
+   - `initial catalog`
+   - `uid`
+   - `password`
+   - timeout field
+5. Several misleading errors came from diagnostics/config formatting rather than the real database:
+   - `ConnectTimeout=` is not accepted by .NET Framework `System.Data.SqlClient`; use `Connect Timeout=`.
+   - `Timeout=` is normalized to `Connect Timeout=`.
+   - A copied outer `ConnectionString=` wrapper must be removed before parsing.
+   - PowerShell assignment through the wrong builder pattern produced a false `Keyword not supported: 'ConnectionString'`; validation must use the `SqlConnectionStringBuilder(string)` constructor.
+6. Kudu/SCM can observe a stale environment snapshot after App Service configuration changes. Kudu is useful for deployment diagnostics, but it is not the final authority for application runtime SQL health.
+7. Rapid overlapping GitHub deployments can collide during ZIP deploy/restart. Production deployment is therefore serialized with a GitHub Actions concurrency lock.
 
-- `ConnectTimeout=` instead of the .NET Framework `System.Data.SqlClient` form `Connect Timeout=`.
-- An outer wrapper `ConnectionString=<actual SQL connection string>`, which `System.Data.SqlClient` incorrectly sees as a connection-string keyword unless the wrapper is removed first.
+## Server-side settings
 
-The OpenAI API was tested independently from the same Azure App Service runtime and must return HTTP 200 before a deployment is declared healthy.
+SQL:
 
-Required server-side OpenAI setting:
+`BAP_SUPPORT_CONNECTION_STRING`
+
+OpenAI:
 
 `OPENAI_API_KEY_DEVELOPMENT`
 
-Never put either secret value in source code, GitHub, logs, screenshots, or documentation.
+Optional OpenAI model override:
 
-## Permanent code rules
+`OPENAI_MODEL`
 
-1. SQL must always come from the server-side environment variable `BAP_SUPPORT_CONNECTION_STRING`.
-2. `AppConfig.SqlConnectionString` must normalize shared/copied connection-string formats before `SqlConnection` sees them:
-   - Strip an outer leading `ConnectionString=` wrapper if present.
-   - Remove matching outer quotes if present.
-   - `ConnectTimeout=` -> `Connect Timeout=`.
-   - `ConnectionTimeout=` -> `Connection Timeout=`.
-3. The app must never contain an embedded SQL server, user name, password, or full connection string.
-4. OpenAI must come from `OPENAI_API_KEY_DEVELOPMENT`, with legacy fallback to `OPENAI_API_KEY` only where explicitly supported.
-5. Default API model is `gpt-5-mini`; `OPENAI_MODEL` can override it from Azure without a source change.
-6. ASP.NET `executionTimeout` is 300 seconds so the Web Forms request is not killed while the Agent performs SQL plus OpenAI work.
-7. SQL command timeout remains bounded (`CommandTimeoutSeconds`, default 30); deployment smoke tests use a 10-second SQL timeout.
-8. No local-admin or temporary-auth bypass is allowed. Authentication remains Azure App Service Easy Auth / Microsoft Entra ID.
+Never put the SQL connection value or OpenAI API key in source code, GitHub commits, logs, screenshots, documentation, client-side JavaScript or HTML.
 
-## Mandatory deployment health gate
+## Permanent SQL connection normalization rules
 
-The production workflow `.github/workflows/azure-app-service.yml` runs one deterministic script: `scripts/deploy-and-verify.ps1`.
+Before `SqlConnection` sees the string, `AppConfig.SqlConnectionString` must normalize compatible shared/copied formats:
 
-A deployment is not green merely because the ZIP uploaded or Login.aspx returned 200. The same deployment job must complete all of these checks after the App Service restart:
+- Strip a leading `BAP_SUPPORT_CONNECTION_STRING=` assignment wrapper if accidentally copied.
+- Strip a leading `ConnectionString=` wrapper if accidentally copied.
+- Remove matching outer single/double quotes.
+- `ConnectTimeout=` -> `Connect Timeout=`.
+- `ConnectionTimeout=` -> `Connection Timeout=`.
+- `Timeout=` -> `Connect Timeout=`.
 
-- Full source package reconstructs successfully.
-- Production overrides are applied.
-- No local/temporary login bypass exists.
-- `BAP_SUPPORT_CONNECTION_STRING` is present.
-- `OPENAI_API_KEY_DEVELOPMENT` is present.
-- SQL connects from the actual App Service/Kudu runtime.
-- Read-only query `SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES` succeeds.
-- OpenAI `/v1/responses` smoke test succeeds and returns HTTP 200.
-- Login page returns HTTP 200.
-- Easy Auth returns a Microsoft redirect.
-- Unauthenticated `Default.aspx` redirects instead of opening directly.
+The deployment workflow may canonicalize the Azure value to the plain SQL connection-string form, but it must never print the value.
 
-Safe results are published to the `deployment-status` branch. The connection string and API key must never be published.
+## Bounded timeout rules
 
-Required success markers include:
+Do not solve configuration/network failures by simply increasing timeouts.
 
-- `PACKAGE=success`
-- `SETTINGS=success`
-- `DEPLOY=success`
-- `BACKEND=success`
+Production rules:
+
+- SQL connection timeout: **10 seconds**.
+- SQL command timeout: `CommandTimeoutSeconds`, default **30 seconds**.
+- OpenAI HTTP request/read-write timeout: **30 seconds**.
+- ASP.NET execution timeout may be longer for the full agent request, but each backend dependency must have its own shorter bounded timeout.
+
+This ensures the user receives a real SQL/OpenAI error instead of waiting until Azure/IIS emits a generic timeout page.
+
+## Actual-worker backend health check
+
+The final backend authority is the real ASP.NET App Service worker, not a separate Kudu process.
+
+Deployment temporarily creates a random server-side setting:
+
+`BAP_HEALTH_TOKEN`
+
+The workflow calls `HealthCheck.aspx` with the matching `X-Babco-Health-Token` header. Without the token the page returns 404.
+
+The health page runs inside the same Web Forms application process and performs:
+
+1. SQL connection using `AppConfig.SqlConnectionString`.
+2. Read-only SQL smoke query:
+   `SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES`
+3. OpenAI request using the application's `OpenAIClient`.
+4. Only safe status output is returned; secrets are never returned.
+
+After the check, the workflow deletes `BAP_HEALTH_TOKEN`. The health endpoint is therefore unusable without a newly generated deployment token.
+
+Expected safe markers:
+
+- `HEALTH_PAGE_OK=true`
 - `SQL_OK=true`
 - `SQL_TABLE_COUNT=<number>`
-- `OPENAI_OK=True` or `OPENAI_OK=true`
-- `OPENAI_HTTP=200`
+- `OPENAI_OK=true`
+
+## Deployment concurrency rule
+
+`.github/workflows/azure-app-service.yml` must contain a production concurrency lock:
+
+- Group: `babco-sqlagent-production`
+- `cancel-in-progress: true`
+
+Only the latest deployment should modify/restart the production App Service. Never run multiple ZIP deployments to the same App Service concurrently.
+
+## Mandatory production deployment gate
+
+The production workflow uses GitHub OIDC and `scripts/deploy-and-verify.ps1`.
+
+A deployment is complete only when all of the following are true:
+
+- `PACKAGE=success`
+- Full source package reconstruction succeeds.
+- Production overrides are applied.
+- No local/temporary admin login bypass exists.
+- Easy Auth code is present.
+- `SQL_SETTING_PRESENT=true`
+- `OPENAI_SETTING_PRESENT=true`
+- `SQL_PARSE_OK=true`
+- `DEPLOY=success`
+- Actual ASP.NET worker health page executes.
+- `SQL_OK=true`
+- `SQL_TABLE_COUNT=<number>`
+- `OPENAI_OK=true`
+- `BACKEND=success`
+- Login returns HTTP 200.
+- `/.auth/login/aad` redirects to Microsoft (3xx).
+- Unauthenticated `Default.aspx` redirects (3xx).
 - `VERIFY=success`
 - `VERIFIED_LIVE=true`
 
-## If SQL fails
+Safe deployment results are published to the `deployment-status` branch. Do not declare the site healthy from ZIP deployment or Login.aspx alone.
 
-Check in this order:
+## SQL failure classification after parsing succeeds
 
-1. Confirm `BAP_SUPPORT_CONNECTION_STRING` exists in Azure App Service Environment Variables.
-2. Never print the value. Test only safe properties/results.
-3. Normalize the outer `ConnectionString=` wrapper and timeout aliases before constructing `SqlConnectionStringBuilder` or `SqlConnection`.
-4. Run the read-only smoke query from the App Service runtime, not only from a developer PC.
-5. If parsing succeeds but connection fails, classify the actual SQL exception: DNS/server name, firewall/network, authentication, database name, certificate/encryption, or timeout.
-6. Do not increase timeouts to hide a parsing, authentication, or network configuration error.
+If `SQL_PARSE_OK=true` but `SQL_OK=false`, the remaining error is a genuine runtime category. Fix it by the exact exception, not by guessing:
 
-## If OpenAI fails
+1. **Connection timeout / server not found**
+   - Verify SQL hostname/instance and TCP port.
+   - Verify Azure App Service outbound connectivity to the SQL server.
+   - Verify SQL firewall/network rules permit the App Service path.
+   - If the database is on a private/on-prem network, provide VNet/Hybrid Connection/VPN/private networking as appropriate.
 
-Check in this order:
+2. **Login failed**
+   - Verify SQL username/password in the server-side setting.
+   - Verify SQL authentication mode and login state.
+   - Never expose the password in chat or logs.
 
-1. Confirm `OPENAI_API_KEY_DEVELOPMENT` exists in Azure App Service Environment Variables.
-2. Restart/redeploy after environment-variable changes so the worker process receives the setting.
-3. Verify `OPENAI_MODEL`; default is `gpt-5-mini` unless Azure overrides it.
-4. Run a short `/v1/responses` smoke test from the same App Service runtime.
-5. Distinguish HTTP 400 (request/model parameters), 401/403 (key/project/access), 429 (quota/rate limit), 404/model issues, and network timeout.
-6. Never display or log the API key or Authorization header.
+3. **Cannot open database / initial catalog error**
+   - Verify database name.
+   - Verify the login has access to that database.
+
+4. **Certificate/encryption error**
+   - Use the SQL server's supported encryption/certificate settings.
+   - Do not disable security globally merely to hide a certificate error.
+
+5. **Permission denied after connection succeeds**
+   - The SQL identity should be read-only and have only the permissions required for SELECT/schema metadata.
+
+## OpenAI failure classification
+
+The OpenAI key was independently proven usable during this incident. If OpenAI later fails, classify the HTTP result:
+
+- 400: request/model parameters.
+- 401/403: API key, project or access.
+- 404: model/endpoint issue.
+- 429: quota/rate limit.
+- Network timeout: outbound connectivity or transient network issue.
+
+Never expose the key or Authorization header.
+
+## Security rules
+
+- SQL stays read-only at both application guardrail and database-account permission levels.
+- No SQL/OpenAI secret values in source or client-side output.
+- Health token is random, temporary, server-side, and removed after deployment health verification.
+- Health endpoint returns 404 without the valid temporary token.
+- Local/temporary authentication bypass is not allowed in production.
+- Authentication remains Microsoft Entra through Azure App Service Easy Auth.
 
 ## Root-cause lesson
 
-A generic browser-side `500 - request timed out` is not enough to label the issue as SQL or OpenAI. Always isolate Auth, SQL, and OpenAI from the same Azure App Service runtime. Connection-string text copied from portals or shared configuration must be treated as input that can contain wrappers/aliases and normalized before `System.Data.SqlClient` parses it. Future deployments must fail the health gate instead of reporting success when either SQL or OpenAI is unhealthy.
+The correct troubleshooting order is:
+
+**Entra -> Settings present -> Connection-string parse -> Deploy -> Actual ASP.NET worker SQL -> Actual ASP.NET worker OpenAI -> Live page verification**
+
+Do not use a generic browser 500, a static source check, or a separate Kudu environment alone as proof of application health. The final decision must come from the actual deployed worker with bounded backend timeouts and one serialized production deployment at a time.
