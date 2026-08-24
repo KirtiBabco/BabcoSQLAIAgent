@@ -1,0 +1,1 @@
+Deploy current SQL AI Agent source with Admin/Costing UI only. Preserve all existing SQL, Entra, OpenAI and Babco runtime settings unchanged.
