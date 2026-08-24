@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: babco-sqlagent-production
+  cancel-in-progress: true
+
 permissions:
   id-token: write
   contents: write
