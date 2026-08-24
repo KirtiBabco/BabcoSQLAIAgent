@@ -81,7 +81,14 @@ function TestTcp([string]$hostName,[int]$port){
 $serverSpec=''
 try{
   Add-Type -AssemblyName System.Data
-  $raw=[Environment]::GetEnvironmentVariable('BAP_SUPPORT_CONNECTION_STRING')
+  $raw=[Environment]::GetEnvironmentVariable('SQLCONNSTR_BabcoSupportConnectionString')
+  $source='SQLCONNSTR_BabcoSupportConnectionString'
+  if([string]::IsNullOrWhiteSpace($raw)){$raw=[Environment]::GetEnvironmentVariable('SQLAZURECONNSTR_BabcoSupportConnectionString');$source='SQLAZURECONNSTR_BabcoSupportConnectionString'}
+  if([string]::IsNullOrWhiteSpace($raw)){$raw=[Environment]::GetEnvironmentVariable('CUSTOMCONNSTR_BabcoSupportConnectionString');$source='CUSTOMCONNSTR_BabcoSupportConnectionString'}
+  if([string]::IsNullOrWhiteSpace($raw)){$raw=[Environment]::GetEnvironmentVariable('BAP_SUPPORT_CONNECTION_STRING');$source='BAP_SUPPORT_CONNECTION_STRING'}
+  if([string]::IsNullOrWhiteSpace($raw)){$raw=[Environment]::GetEnvironmentVariable('SQL_BAP_SUPPORT_CONNECTION_STRING');$source='SQL_BAP_SUPPORT_CONNECTION_STRING'}
+  if([string]::IsNullOrWhiteSpace($raw)){$raw=[Environment]::GetEnvironmentVariable('SQL_CONNECTION_STRING');$source='SQL_CONNECTION_STRING'}
+  OutSafe 'SQL_RUNTIME_SOURCE' $source
   OutSafe 'SQL_RUNTIME_SETTING_PRESENT' (-not [string]::IsNullOrWhiteSpace($raw))
   OutSafe 'SQL_RUNTIME_RAW_KEY_NAMES' (GetKeyNames $raw)
   $cs=NormalizeSql $raw
