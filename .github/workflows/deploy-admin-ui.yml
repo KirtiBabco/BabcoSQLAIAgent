@@ -1,0 +1,173 @@
+name: Deploy Admin UI Only
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-admin-ui.yml'
+      - 'deploy-overrides/Default.aspx'
+      - 'deploy-overrides/Admin.aspx'
+      - 'deploy-overrides/Admin.aspx.cs'
+      - 'deploy-overrides/App_Code/AuthService.cs'
+      - 'ops/run-admin-ui-deploy.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: 7a21e1b8-ee78-429e-8051-5dce354e3e1d
+  AZURE_TENANT_ID: 7e3bfe8e-acb5-4e0e-9798-c05331d2940c
+  AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
+  RESOURCE_GROUP: rg-babco-rnd-sandbox
+  WEB_APP: babco-sqlagent-wf-2c606af4
+  LOGIN_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
+  ADMIN_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Admin.aspx
+
+jobs:
+  deploy-admin-ui:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login with existing OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Build current source with UI overrides only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $status=Join-Path $env:RUNNER_TEMP 'admin-ui-status.txt'
+          "SOURCE_COMMIT=$env:GITHUB_SHA" | Set-Content $status -Encoding ascii
+          Add-Content $status 'SETTINGS_CHANGED=false'
+
+          $b64=Get-Content (Join-Path $env:GITHUB_WORKSPACE 'source-package\current-source.b64') -Raw
+          $sourceZip=Join-Path $env:RUNNER_TEMP 'admin-current-source.zip'
+          [IO.File]::WriteAllBytes($sourceZip,[Convert]::FromBase64String($b64.Trim()))
+          $sha=(Get-FileHash $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Add-Content $status "SOURCE_ZIP_SHA256=$sha"
+          if($sha -ne '99d00cf14da4c30a2b7e787a90e9a4aeb9575136800c64fb1357df9fefd3ac7a'){throw 'Current source hash mismatch.'}
+
+          $root=Join-Path $env:RUNNER_TEMP 'admin-current-source'
+          if(Test-Path $root){Remove-Item $root -Recurse -Force}
+          Expand-Archive $sourceZip $root -Force
+          $site=Join-Path $root 'SQL_AI_Agent'
+          if(-not(Test-Path $site)){throw 'SQL_AI_Agent source folder missing.'}
+
+          $overrides=Join-Path $env:GITHUB_WORKSPACE 'deploy-overrides'
+          Get-ChildItem $overrides -Recurse -File | ForEach-Object {
+            $rel=$_.FullName.Substring($overrides.Length).TrimStart([char[]]@('\','/'))
+            $dest=Join-Path $site $rel
+            $parent=Split-Path $dest -Parent
+            if(-not(Test-Path $parent)){New-Item -ItemType Directory -Path $parent -Force|Out-Null}
+            Copy-Item $_.FullName $dest -Force
+          }
+
+          foreach($required in @('Admin.aspx','Admin.aspx.cs','Default.aspx','App_Code\AuthService.cs')){
+            if(-not(Test-Path (Join-Path $site $required))){throw "Missing UI runtime file: $required"}
+          }
+          $defaultText=Get-Content (Join-Path $site 'Default.aspx') -Raw
+          $adminText=Get-Content (Join-Path $site 'Admin.aspx') -Raw
+          $authText=Get-Content (Join-Path $site 'App_Code\AuthService.cs') -Raw
+          if(-not $defaultText.Contains('Costing / Admin')){throw 'Default.aspx admin link missing.'}
+          if(-not $adminText.Contains('Admin Console')){throw 'Admin.aspx content missing.'}
+          if(-not $authText.Contains('kirti@babcofoods.com')){throw 'Kirti Admin role rule missing.'}
+          Add-Content $status 'PACKAGE_UI_VALID=true'
+
+          $deployZip=Join-Path $env:RUNNER_TEMP 'admin-ui-deploy.zip'
+          if(Test-Path $deployZip){Remove-Item $deployZip -Force}
+          Compress-Archive -Path (Join-Path $site '*') -DestinationPath $deployZip -Force
+          "DEPLOY_ZIP=$deployZip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Deploy UI package without changing app settings
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $status=Join-Path $env:RUNNER_TEMP 'admin-ui-status.txt'
+          $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
+          $p=@($profiles | Where-Object { $_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy' } | Select-Object -First 1)
+          if($p.Count -eq 0){throw 'Publishing profile unavailable.'}
+          $u=[string]$p[0].userName;$pw=[string]$p[0].userPWD
+          Write-Output "::add-mask::$u";Write-Output "::add-mask::$pw"
+          $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
+          $headers=@{Authorization="Basic $basic"}
+          $deployUri="https://$env:WEB_APP.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
+          $response=Invoke-WebRequest -Method Post -Uri $deployUri -Headers $headers -InFile $env:DEPLOY_ZIP -ContentType 'application/zip' -UseBasicParsing -TimeoutSec 600
+          Add-Content $status "KUDU_DEPLOY_HTTP=$([int]$response.StatusCode)"
+          if([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300){throw "Kudu zipdeploy HTTP $([int]$response.StatusCode)"}
+          Add-Content $status 'DEPLOY=success'
+          az webapp restart -g $env:RESOURCE_GROUP -n $env:WEB_APP --only-show-errors | Out-Null
+          Start-Sleep -Seconds 12
+
+          $verify=@'
+          $ErrorActionPreference='Continue'
+          $root='D:\home\site\wwwroot'
+          if(-not(Test-Path $root)){$root='C:\home\site\wwwroot'}
+          $admin=Join-Path $root 'Admin.aspx'
+          $adminCs=Join-Path $root 'Admin.aspx.cs'
+          $default=Join-Path $root 'Default.aspx'
+          $auth=Join-Path $root 'App_Code\AuthService.cs'
+          Write-Output ('ADMIN_FILE='+((Test-Path $admin).ToString().ToLowerInvariant()))
+          Write-Output ('ADMIN_CODEBEHIND='+((Test-Path $adminCs).ToString().ToLowerInvariant()))
+          $hasLink=$false;if(Test-Path $default){$hasLink=(Get-Content $default -Raw).Contains('Costing / Admin')}
+          Write-Output ('DEFAULT_ADMIN_LINK='+$hasLink.ToString().ToLowerInvariant())
+          $hasRule=$false;if(Test-Path $auth){$hasRule=(Get-Content $auth -Raw).Contains('kirti@babcofoods.com')}
+          Write-Output ('ADMIN_ROLE_RULE='+$hasRule.ToString().ToLowerInvariant())
+          '@
+          $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($verify))
+          $body=@{command="powershell -NoProfile -NonInteractive -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
+          $rr=Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 120
+          ([string]$rr.Output -split "`r?`n" | Where-Object {$_ -match '^(ADMIN_|DEFAULT_)'}) | Add-Content $status
+
+      - name: Verify live routes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          $status=Join-Path $env:RUNNER_TEMP 'admin-ui-status.txt'
+          $loginCode=0
+          for($i=1;$i -le 20;$i++){
+            try{$r=Invoke-WebRequest -Uri $env:LOGIN_URL -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 20;$loginCode=[int]$r.StatusCode}catch{$loginCode=0}
+            if($loginCode -eq 200){break};Start-Sleep -Seconds 4
+          }
+          Add-Content $status "LOGIN_HTTP=$loginCode"
+
+          $adminCode=0
+          try{$r2=Invoke-WebRequest -Uri $env:ADMIN_URL -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop;$adminCode=[int]$r2.StatusCode}catch{try{$adminCode=[int]$_.Exception.Response.StatusCode}catch{}}
+          Add-Content $status "ADMIN_HTTP_UNAUTH=$adminCode"
+          Add-Content $status "CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
+
+      - name: Publish admin UI deployment status
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $d=Join-Path $env:RUNNER_TEMP 'admin-ui-publish';New-Item -ItemType Directory -Path $d -Force|Out-Null
+          $p=Join-Path $env:RUNNER_TEMP 'admin-ui-status.txt'
+          if(Test-Path $p){Copy-Item $p (Join-Path $d 'status.txt')}else{'ADMIN_UI_DEPLOY_FAILED=true'|Set-Content (Join-Path $d 'status.txt')}
+          Push-Location $d;git init|Out-Null;git checkout -b admin-ui-deploy-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish admin UI deployment status'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin admin-ui-deploy-status|Out-Null;Pop-Location
+
+      - name: Require UI deployment verification
+        if: always()
+        shell: pwsh
+        run: |
+          $p=Join-Path $env:RUNNER_TEMP 'admin-ui-status.txt'
+          $lines=@(Get-Content $p)
+          if(-not($lines -contains 'SETTINGS_CHANGED=false')){throw 'Settings-preservation marker missing.'}
+          if(-not($lines -contains 'PACKAGE_UI_VALID=true')){throw 'UI package validation failed.'}
+          if(-not($lines -contains 'DEPLOY=success')){throw 'UI deployment failed.'}
+          if(-not($lines -contains 'ADMIN_FILE=true')){throw 'Admin.aspx is not live.'}
+          if(-not($lines -contains 'ADMIN_CODEBEHIND=true')){throw 'Admin code-behind is not live.'}
+          if(-not($lines -contains 'DEFAULT_ADMIN_LINK=true')){throw 'Admin link is not live.'}
+          if(-not($lines -contains 'ADMIN_ROLE_RULE=true')){throw 'Kirti Admin role rule is not live.'}
+          if(-not($lines -contains 'LOGIN_HTTP=200')){throw 'Login page is not healthy.'}
+          $adminLine=$lines | Where-Object {$_ -match '^ADMIN_HTTP_UNAUTH='} | Select-Object -Last 1
+          $code=0;if($adminLine){[int]::TryParse(($adminLine -split '=',2)[1],[ref]$code)|Out-Null}
+          if($code -notin @(200,302,401,403)){throw "Admin route returned unexpected HTTP $code"}
