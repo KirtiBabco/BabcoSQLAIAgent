@@ -48,11 +48,11 @@ jobs:
               if((Get-Item $f).PSIsContainer){
                 Get-ChildItem $f -File -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 5 | ForEach-Object {
                   Write-Output ('FILE='+$_.FullName)
-                  Get-Content $_.FullName -Tail 120 -ErrorAction SilentlyContinue
+                  Get-Content $_.FullName -Tail 160 -ErrorAction SilentlyContinue
                 }
               } else {
                 Write-Output ('FILE='+$f)
-                Get-Content $f -Tail 250 -ErrorAction SilentlyContinue
+                Get-Content $f -Tail 400 -ErrorAction SilentlyContinue
               }
             }
           }
@@ -61,9 +61,8 @@ jobs:
           $body=@{command="powershell -NoProfile -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
           $r=Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers @{Authorization="Basic $basic"} -ContentType 'application/json' -Body $body -TimeoutSec 120
           $text=([string]$r.Output)+"`n"+([string]$r.Error)
-          # Keep only useful exception/config lines and redact common secret patterns.
-          $lines=$text -split "`r?`n" | Where-Object { $_ -match '(?i)(exception|error|configuration|parser|could not load|assembly|web\.config|keyword not supported|connectionstring|line \d+|source file|stack trace|runtime error)' }
-          $safe=($lines | Select-Object -Last 120) -join "`n"
+          $lines=$text -split "`r?`n" | Where-Object { $_ -match '(?i)(exception|error|configuration|parser|could not load|assembly|web\.config|keyword not supported|connectionstring|line \d+|source file|stack trace|runtime error|CS\d{4})' }
+          $safe=($lines | Select-Object -Last 160) -join "`n"
           $safe=[regex]::Replace($safe,'(?i)(password|pwd)\s*=\s*[^;\s<]+','$1=***')
           $safe=[regex]::Replace($safe,'(?i)(user id|uid)\s*=\s*[^;\s<]+','$1=***')
           $safe=[regex]::Replace($safe,'sk-[A-Za-z0-9_-]{16,}','***')
