@@ -1,5 +1,20 @@
 $ErrorActionPreference='Continue'
 function OutSafe([string]$k,[object]$v){ Write-Output ($k+'='+[string]$v) }
+function GetKeyNames([string]$v){
+  if([string]::IsNullOrWhiteSpace($v)){return ''}
+  $names=New-Object System.Collections.Generic.List[string]
+  foreach($part in ($v -split ';')){
+    $p=$part.IndexOf('=')
+    if($p -gt 0){$name=$part.Substring(0,$p).Trim().Trim('"').Trim("'");if($name -and -not $names.Contains($name)){$names.Add($name)}}
+  }
+  return ($names -join ',')
+}
+function SafeMessage([string]$v){
+  if([string]::IsNullOrWhiteSpace($v)){return ''}
+  $v=($v -replace '[\r\n]+',' ').Trim()
+  if($v.Length -gt 300){$v=$v.Substring(0,300)}
+  return $v
+}
 function NormalizeSql([string]$v){
   if([string]::IsNullOrWhiteSpace($v)){return ''}
   $v=$v.Trim()
@@ -23,28 +38,31 @@ function Classify([Exception]$ex){
       default {return ('SQL_ERROR_'+$ex.Number)}
     }
   }
+  if($ex -is [ArgumentException]){return 'CONNECTION_STRING_FORMAT'}
   return $ex.GetType().Name.ToUpperInvariant()
 }
 try{
   Add-Type -AssemblyName System.Data
   $raw=[Environment]::GetEnvironmentVariable('BAP_SUPPORT_CONNECTION_STRING')
   OutSafe 'SQL_RUNTIME_SETTING_PRESENT' (-not [string]::IsNullOrWhiteSpace($raw))
+  OutSafe 'SQL_RUNTIME_RAW_KEY_NAMES' (GetKeyNames $raw)
   $cs=NormalizeSql $raw
-  $builder=[System.Data.SqlClient.SqlConnectionStringBuilder]::new([string]$cs)
-  $builder.ConnectTimeout=10
+  OutSafe 'SQL_RUNTIME_NORMALIZED_KEY_NAMES' (GetKeyNames $cs)
+  $builder=New-Object System.Data.SqlClient.SqlConnectionStringBuilder $cs
+  $builder['Connect Timeout']=10
   $hostName=([string]$builder.DataSource).Trim().ToLowerInvariant()
   if($hostName.StartsWith('tcp:')){$hostName=$hostName.Substring(4)}
   if($hostName.Contains(',')){$hostName=$hostName.Split(',')[0]}
   OutSafe 'SQL_SERVER_KIND' ($(if($hostName.EndsWith('.database.windows.net')){'AZURE_SQL'}else{'SQL_SERVER'}))
   OutSafe 'SQL_DATABASE_PRESENT' (-not [string]::IsNullOrWhiteSpace([string]$builder.InitialCatalog))
   $sw=[Diagnostics.Stopwatch]::StartNew()
-  $connection=[System.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+  $connection=New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString
   $connection.Open()
   $command=$connection.CreateCommand();$command.CommandTimeout=10;$command.CommandText='SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES'
   $tables=$command.ExecuteScalar();$connection.Close();$sw.Stop()
-  OutSafe 'SQL_OK' 'true';OutSafe 'SQL_TABLE_COUNT' $tables;OutSafe 'SQL_MS' $sw.ElapsedMilliseconds;OutSafe 'SQL_ERROR_CLASSIFICATION' 'OK';OutSafe 'SQL_ERROR_NUMBER' ''
+  OutSafe 'SQL_OK' 'true';OutSafe 'SQL_TABLE_COUNT' $tables;OutSafe 'SQL_MS' $sw.ElapsedMilliseconds;OutSafe 'SQL_ERROR_CLASSIFICATION' 'OK';OutSafe 'SQL_ERROR_NUMBER' '';OutSafe 'SQL_ERROR_MESSAGE' ''
 }catch{
   $e=$_.Exception
-  OutSafe 'SQL_OK' 'false';OutSafe 'SQL_ERROR_TYPE' $e.GetType().Name;OutSafe 'SQL_ERROR_CLASSIFICATION' (Classify $e)
+  OutSafe 'SQL_OK' 'false';OutSafe 'SQL_ERROR_TYPE' $e.GetType().Name;OutSafe 'SQL_ERROR_CLASSIFICATION' (Classify $e);OutSafe 'SQL_ERROR_MESSAGE' (SafeMessage $e.Message)
   if($e -is [System.Data.SqlClient.SqlException]){OutSafe 'SQL_ERROR_NUMBER' $e.Number}else{OutSafe 'SQL_ERROR_NUMBER' ''}
 }
