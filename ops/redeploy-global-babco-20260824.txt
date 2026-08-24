@@ -1,3 +1,1 @@
-Trigger final runtime verification after direct current-source recovery.
-Current source ZIP SHA256=99d00cf14da4c30a2b7e787a90e9a4aeb9575136800c64fb1357df9fefd3ac7a.
-Login recovery verified HTTP 200.
+Run final runtime verification after mirroring the actual working BabcoSupportConnectionString AppSetting from app-babco-unloadcompare-0e27b0b7-260818. Require SQL real query, OpenAI, Login and Entra PASS.
