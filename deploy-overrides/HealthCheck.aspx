@@ -23,7 +23,9 @@
         int tableCount = -1;
         try
         {
-            using (var connection = new SqlConnection(SQL_AI_Agent.AppConfig.SqlConnectionString))
+            var builder = new SqlConnectionStringBuilder(SQL_AI_Agent.AppConfig.SqlConnectionString);
+            builder.ConnectTimeout = 10;
+            using (var connection = new SqlConnection(builder.ConnectionString))
             {
                 connection.Open();
                 using (var command = connection.CreateCommand())
