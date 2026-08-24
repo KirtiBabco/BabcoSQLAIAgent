@@ -1,0 +1,86 @@
+name: Inspect Babco SQL Network
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/inspect-babco-sql-network.yml'
+      - 'ops/run-babco-network-inspect.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: 7a21e1b8-ee78-429e-8051-5dce354e3e1d
+  AZURE_TENANT_ID: 7e3bfe8e-acb5-4e0e-9798-c05331d2940c
+  AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
+  RG: rg-babco-rnd-sandbox
+  SOURCE_APP: app-babco-unloadcompare-0e27b0b7-260814
+  TARGET_APP: babco-sqlagent-wf-2c606af4
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Inspect safe network metadata
+        shell: bash
+        run: |
+          set +e
+          out="$RUNNER_TEMP/network-status.txt"
+          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$out"
+          for app in "$SOURCE_APP" "$TARGET_APP"; do
+            prefix="SOURCE"
+            [ "$app" = "$TARGET_APP" ] && prefix="TARGET"
+            hc=$(az webapp hybrid-connection list -g "$RG" -n "$app" -o json --only-show-errors 2>/dev/null)
+            if [ $? -eq 0 ]; then
+              count=$(jq 'length' <<< "$hc")
+              echo "${prefix}_HYBRID_COUNT=$count" >> "$out"
+              jq -r --arg p "$prefix" '.[] | [$p, (.hostname // .hostName // ""), ((.port // "")|tostring), (.serviceBusNamespace // ""), (.hybridConnection // .name // ""), (.relayArmUri // "")] | @tsv' <<< "$hc" | while IFS=$'\t' read -r p host port ns hcname relay; do
+                echo "${p}_HYBRID=HOST=${host}|PORT=${port}|NAMESPACE=${ns}|NAME=${hcname}|RELAY=${relay}" >> "$out"
+              done
+            else
+              echo "${prefix}_HYBRID_LIST_ERROR=true" >> "$out"
+            fi
+            vnet=$(az webapp vnet-integration list -g "$RG" -n "$app" -o json --only-show-errors 2>/dev/null)
+            if [ $? -eq 0 ]; then
+              count=$(jq 'length' <<< "$vnet")
+              echo "${prefix}_VNET_COUNT=$count" >> "$out"
+              jq -r --arg p "$prefix" '.[] | [$p, (.vnetResourceId // .subnetResourceId // .id // "")] | @tsv' <<< "$vnet" | while IFS=$'\t' read -r p id; do echo "${p}_VNET=$id" >> "$out"; done
+            else
+              echo "${prefix}_VNET_LIST_ERROR=true" >> "$out"
+            fi
+            settings=$(az webapp config appsettings list -g "$RG" -n "$app" -o json --only-show-errors 2>/dev/null)
+            dns=$(jq -r '[.[]|select(.name=="WEBSITE_DNS_SERVER")][0].value // empty' <<< "$settings")
+            route=$(jq -r '[.[]|select(.name=="WEBSITE_VNET_ROUTE_ALL")][0].value // empty' <<< "$settings")
+            [ -n "$dns" ] && echo "${prefix}_CUSTOM_DNS_PRESENT=true" >> "$out" || echo "${prefix}_CUSTOM_DNS_PRESENT=false" >> "$out"
+            echo "${prefix}_VNET_ROUTE_ALL=${route}" >> "$out"
+          done
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$out"
+          cat "$out"
+
+      - name: Publish safe network status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/pub";mkdir -p "$d"
+          p="$RUNNER_TEMP/network-status.txt"
+          if [ -f "$p" ]; then cp "$p" "$d/status.txt"; else echo 'INSPECT_FAILED=true' > "$d/status.txt"; fi
+          cd "$d"
+          git init -q;git checkout -q -b babco-network-status
+          git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt;git commit -q -m 'Publish Babco SQL network status'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin babco-network-status >/dev/null
