@@ -23,38 +23,42 @@ function Publish{
 }
 function RemoveHealthToken{if(-not [string]::IsNullOrWhiteSpace($script:healthToken)){try{az webapp config appsettings delete -g $resourceGroup -n $webApp --setting-names BAP_HEALTH_TOKEN --output none|Out-Null;$script:healthToken=''}catch{Write-Warning 'Could not remove BAP_HEALTH_TOKEN.'}}}
 try{
-  # Full source package + production overrides
   $parts=Get-ChildItem (Join-Path $repoRoot 'source-package') -Filter 'part*.b64'|Sort-Object Name;SetS 'PACKAGE_PARTS' $parts.Count;if($parts.Count -lt 1){throw 'No source package parts found.'}
   $b64=($parts|ForEach-Object{(Get-Content $_.FullName -Raw).Trim()}) -join '';$sourceZip=Join-Path $env:RUNNER_TEMP 'source.zip';[IO.File]::WriteAllBytes($sourceZip,[Convert]::FromBase64String($b64));SetS 'PACKAGE_SHA256' ((Get-FileHash $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant())
   $extract=Join-Path $env:RUNNER_TEMP 'source';if(Test-Path $extract){Remove-Item $extract -Recurse -Force};Expand-Archive $sourceZip $extract -Force;$site=Join-Path $extract 'SQL_AI_Agent';if(-not(Test-Path $site)){throw 'SQL_AI_Agent source folder missing.'}
   $overrides=Join-Path $repoRoot 'deploy-overrides';Get-ChildItem $overrides -Recurse -File|ForEach-Object{$rel=$_.FullName.Substring($overrides.Length).TrimStart([char[]]@('\','/'));$dest=Join-Path $site $rel;$parent=Split-Path $dest -Parent;if(-not(Test-Path $parent)){New-Item -ItemType Directory -Path $parent -Force|Out-Null};Copy-Item $_.FullName $dest -Force};SetS 'OVERRIDES_APPLIED' 'true'
-  foreach($f in @('Login.aspx','Default.aspx','Web.config','HealthCheck.aspx','HealthCheck.aspx.cs','App_Code\AppConfig.cs','App_Code\AuthService.cs','App_Code\SqlTool.cs','App_Code\AgentService.cs')){if(-not(Test-Path(Join-Path $site $f))){throw "Missing runtime source file: $f"}}
+  foreach($f in @('Login.aspx','Default.aspx','Web.config','HealthCheck.aspx','App_Code\AppConfig.cs','App_Code\AuthService.cs','App_Code\SqlTool.cs','App_Code\AgentService.cs')){if(-not(Test-Path(Join-Path $site $f))){throw "Missing runtime source file: $f"}}
   $runtime=(Get-Content(Join-Path $site 'Login.aspx')-Raw)+(Get-Content(Join-Path $site 'App_Code\AuthService.cs')-Raw);if($runtime -match 'Local Test Admin Login|Continue Without Microsoft|LOCAL-ADMIN|ENTRA_CLIENT_SECRET'){throw 'Forbidden local auth/custom Entra secret logic present.'}
   SetS 'SOURCE_LOCAL_ADMIN_REMOVED' 'true';SetS 'SOURCE_EASY_AUTH' 'true';SetS 'SOURCE_GLOBAL_SQL' 'true'
   $zip=Join-Path $env:RUNNER_TEMP 'site.zip';if(Test-Path $zip){Remove-Item $zip -Force};Compress-Archive -Path(Join-Path $site '*') -DestinationPath $zip -Force;SetS 'PACKAGE' 'success';SetS 'PACKAGE_VALID' 'true'
 
-  # Canonicalize Azure settings safely
   $settings=az webapp config appsettings list -g $resourceGroup -n $webApp|ConvertFrom-Json;$sqlItem=@($settings|Where-Object{$_.name -eq 'BAP_SUPPORT_CONNECTION_STRING'});$keyItem=@($settings|Where-Object{$_.name -eq 'OPENAI_API_KEY_DEVELOPMENT'})
   $sqlPresent=$sqlItem.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$sqlItem[0].value);$keyPresent=$keyItem.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$keyItem[0].value);SetS 'SQL_SETTING_PRESENT' $sqlPresent.ToString().ToLowerInvariant();SetS 'OPENAI_SETTING_PRESENT' $keyPresent.ToString().ToLowerInvariant();if(-not$sqlPresent){throw 'BAP_SUPPORT_CONNECTION_STRING missing.'};if(-not$keyPresent){throw 'OPENAI_API_KEY_DEVELOPMENT missing.'}
   $rawSql=[string]$sqlItem[0].value;$rawKey=[string]$keyItem[0].value;Write-Output "::add-mask::$rawSql";Write-Output "::add-mask::$rawKey";SetS 'SQL_RAW_KEY_NAMES'(Keys $rawSql);$sql=NormalizeSql $rawSql;Write-Output "::add-mask::$sql";SetS 'SQL_NORMALIZED_KEY_NAMES'(Keys $sql)
   Add-Type -AssemblyName System.Data;try{$parse=[System.Data.SqlClient.SqlConnectionStringBuilder]::new([string]$sql);SetS 'SQL_PARSE_OK' 'true'}catch{SetS 'SQL_PARSE_OK' 'false';SetS 'SQL_PARSE_ERROR' $_.Exception.Message;throw}
   if($sql -ne $rawSql){az webapp config appsettings set -g $resourceGroup -n $webApp --settings "BAP_SUPPORT_CONNECTION_STRING=$sql" --output none;if($LASTEXITCODE -ne 0){throw 'Failed to canonicalize SQL setting.'};SetS 'SQL_SETTING_CANONICALIZED' 'true'}else{SetS 'SQL_SETTING_CANONICALIZED' 'false'}
 
-  # Temporary one-time token for actual worker health endpoint
   $healthToken=[Guid]::NewGuid().ToString('N')+[Guid]::NewGuid().ToString('N');Write-Output "::add-mask::$healthToken";az webapp config appsettings set -g $resourceGroup -n $webApp --settings "BAP_HEALTH_TOKEN=$healthToken" --output none;if($LASTEXITCODE -ne 0){throw 'Unable to create temporary health token.'};SetS 'SETTINGS' 'success'
 
-  # Deploy/restart
   az webapp start -g $resourceGroup -n $webApp|Out-Null;az webapp deploy -g $resourceGroup -n $webApp --src-path $zip --type zip --clean true --restart true|Out-Null;if($LASTEXITCODE -ne 0){throw 'Azure ZIP deployment failed.'};az webapp restart -g $resourceGroup -n $webApp|Out-Null;SetS 'DEPLOY' 'success'
 
-  # Actual ASP.NET worker process SQL + OpenAI test
-  Start-Sleep -Seconds 20;$health=$null;$lastHealth=$null
-  for($i=1;$i -le 18;$i++){try{$health=Invoke-WebRequest $healthUrl -UseBasicParsing -Headers @{'X-Babco-Health-Token'=$healthToken} -TimeoutSec 150;if([int]$health.StatusCode -eq 200){break}}catch{$lastHealth=$_};Start-Sleep -Seconds 5}
-  if($null -eq $health){throw ('HealthCheck.aspx failed: '+(One $lastHealth.Exception.Message))}
-  $lines=$health.Content -split "`r?`n"|Where-Object{$_ -match '^(SQL_|OPENAI_)'};foreach($line in $lines){Write-Output $line;$p=$line.IndexOf('=');if($p -gt 0){SetS $line.Substring(0,$p) $line.Substring($p+1)}}
-  if(([string]$status.SQL_OK).ToLowerInvariant() -ne 'true'){throw ('SQL runtime smoke test failed: '+$status.SQL_ERROR)};if(([string]$status.OPENAI_OK).ToLowerInvariant() -ne 'true'){throw ('OpenAI runtime smoke test failed: '+$status.OPENAI_ERROR)};SetS 'BACKEND' 'success'
+  Start-Sleep -Seconds 20;$health=$null;$lastHealth='';$healthBody=''
+  for($i=1;$i -le 6;$i++){
+    try{$health=Invoke-WebRequest $healthUrl -UseBasicParsing -Headers @{'X-Babco-Health-Token'=$healthToken} -TimeoutSec 150;if([int]$health.StatusCode -eq 200){break}}
+    catch{
+      $lastHealth=$_.Exception.Message;$code=0;try{$code=[int]$_.Exception.Response.StatusCode}catch{};SetS 'HEALTH_HTTP' $code
+      try{$stream=$_.Exception.Response.GetResponseStream();if($stream){$reader=New-Object IO.StreamReader($stream);$healthBody=$reader.ReadToEnd();$reader.Dispose()}}catch{}
+      if($healthBody.Length -gt 1000){$healthBody=$healthBody.Substring(0,1000)}
+      if($healthBody){SetS 'HEALTH_ERROR_BODY' ((One $healthBody)-replace '<[^>]+>',' ')}
+    }
+    Start-Sleep -Seconds 5
+  }
+  if($null -eq $health){throw ('HealthCheck.aspx failed: '+(One $lastHealth))}
+  SetS 'HEALTH_HTTP' ([int]$health.StatusCode)
+  $lines=$health.Content -split "`r?`n"|Where-Object{$_ -match '^(HEALTH_|SQL_|OPENAI_)'};foreach($line in $lines){Write-Output $line;$p=$line.IndexOf('=');if($p -gt 0){SetS $line.Substring(0,$p) $line.Substring($p+1)}}
+  if(([string]$status.HEALTH_PAGE_OK).ToLowerInvariant() -ne 'true'){throw 'Health page did not execute.'};if(([string]$status.SQL_OK).ToLowerInvariant() -ne 'true'){throw ('SQL runtime smoke test failed: '+$status.SQL_ERROR)};if(([string]$status.OPENAI_OK).ToLowerInvariant() -ne 'true'){throw ('OpenAI runtime smoke test failed: '+$status.OPENAI_ERROR)};SetS 'BACKEND' 'success'
   RemoveHealthToken;Start-Sleep -Seconds 10
 
-  # Entra/live checks after health token cleanup
   $login=$null;for($i=1;$i -le 24;$i++){try{$login=Invoke-WebRequest $loginUrl -UseBasicParsing -TimeoutSec 30;if([int]$login.StatusCode -eq 200){break}}catch{};Start-Sleep -Seconds 5};if($null -eq $login){throw 'Login.aspx unhealthy.'};SetS 'LOGIN_HTTP' 200
   $easy=0;try{$x=Invoke-WebRequest $easyAuthUrl -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30;$easy=[int]$x.StatusCode}catch{if($_.Exception.Response){$easy=[int]$_.Exception.Response.StatusCode}};if($easy -lt 300 -or $easy -ge 400){throw "Easy Auth HTTP $easy"};SetS 'EASY_AUTH_HTTP' $easy
   $def=0;try{$x=Invoke-WebRequest $defaultUrl -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 30;$def=[int]$x.StatusCode}catch{if($_.Exception.Response){$def=[int]$_.Exception.Response.StatusCode}};if($def -lt 300 -or $def -ge 400){throw "Default unauth HTTP $def"};SetS 'DEFAULT_UNAUTH_HTTP' $def
