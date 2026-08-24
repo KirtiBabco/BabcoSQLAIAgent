@@ -1,8 +1,9 @@
 name: Runtime Diagnostics
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ["Deploy Babco SQL AI Agent to Azure"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -15,9 +16,11 @@ env:
   AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
   AZURE_RESOURCE_GROUP: rg-babco-rnd-sandbox
   WEB_APP: babco-sqlagent-wf-2c606af4
+  SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
   diagnose:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -76,22 +79,22 @@ jobs:
               $r=Invoke-WebRequest -Method Post -Uri $url -Headers @{Authorization=('Bearer '+$key)} -ContentType 'application/json' -Body $payload -UseBasicParsing -TimeoutSec 25
               $sw.Stop();OutSafe 'OPENAI_OK' ([int]$r.StatusCode -ge 200 -and [int]$r.StatusCode -lt 300);OutSafe 'OPENAI_HTTP' ([int]$r.StatusCode);OutSafe 'OPENAI_MS' $sw.ElapsedMilliseconds
             } catch {
-              $status='';$body=''
+              $status='';$responseBody=''
               try{$status=[int]$_.Exception.Response.StatusCode}catch{}
               try {
                 $stream=$_.Exception.Response.GetResponseStream()
-                if($stream){$reader=New-Object IO.StreamReader($stream);$body=$reader.ReadToEnd();$reader.Dispose()}
+                if($stream){$reader=New-Object IO.StreamReader($stream);$responseBody=$reader.ReadToEnd();$reader.Dispose()}
               } catch {}
-              if($body.Length -gt 1200){$body=$body.Substring(0,1200)}
-              $body=$body -replace '[\r\n]+',' '
-              OutSafe 'OPENAI_OK' 'false';OutSafe 'OPENAI_HTTP' $status;OutSafe 'OPENAI_ERROR_TYPE' $_.Exception.GetType().Name;OutSafe 'OPENAI_ERROR' ($_.Exception.Message -replace '[\r\n]+',' ');OutSafe 'OPENAI_ERROR_BODY' $body
+              if($responseBody.Length -gt 1200){$responseBody=$responseBody.Substring(0,1200)}
+              $responseBody=$responseBody -replace '[\r\n]+',' '
+              OutSafe 'OPENAI_OK' 'false';OutSafe 'OPENAI_HTTP' $status;OutSafe 'OPENAI_ERROR_TYPE' $_.Exception.GetType().Name;OutSafe 'OPENAI_ERROR' ($_.Exception.Message -replace '[\r\n]+',' ');OutSafe 'OPENAI_ERROR_BODY' $responseBody
             }
           } else { OutSafe 'OPENAI_OK' 'false';OutSafe 'OPENAI_ERROR' 'No server-side OpenAI API key configured.' }
           '@
           $bytes=[Text.Encoding]::Unicode.GetBytes($script);$encoded=[Convert]::ToBase64String($bytes)
-          $body=@{command="powershell -NoProfile -EncodedCommand $encoded";dir='site\\wwwroot'}|ConvertTo-Json -Compress
+          $requestBody=@{command="powershell -NoProfile -EncodedCommand $encoded";dir='site\\wwwroot'}|ConvertTo-Json -Compress
           $uri="https://$env:WEB_APP.scm.azurewebsites.net/api/command"
-          $r=Invoke-RestMethod -Method Post -Uri $uri -Headers @{Authorization="Bearer $token"} -ContentType 'application/json' -Body $body -TimeoutSec 120
+          $r=Invoke-RestMethod -Method Post -Uri $uri -Headers @{Authorization="Bearer $token"} -ContentType 'application/json' -Body $requestBody -TimeoutSec 120
           $out=[string]$r.Output
           $safe=$out -split "`r?`n" | Where-Object { $_ -match '^(SQL_|OPENAI_)' }
           $safe | Set-Content (Join-Path $env:RUNNER_TEMP 'runtime-status.txt') -Encoding ascii
@@ -106,7 +109,7 @@ jobs:
           $d=Join-Path $env:RUNNER_TEMP 'runtime-publish';New-Item -ItemType Directory -Path $d -Force|Out-Null
           $p=Join-Path $env:RUNNER_TEMP 'runtime-status.txt'
           if(Test-Path $p){Get-Content $p|Set-Content (Join-Path $d 'status.txt') -Encoding ascii}else{'DIAGNOSTIC_RUN_FAILED=true'|Set-Content (Join-Path $d 'status.txt') -Encoding ascii}
-          Add-Content (Join-Path $d 'status.txt') "SOURCE_COMMIT=$env:GITHUB_SHA"
+          Add-Content (Join-Path $d 'status.txt') "SOURCE_COMMIT=$env:SOURCE_COMMIT"
           Add-Content (Join-Path $d 'status.txt') "CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
           Push-Location $d;git init|Out-Null;git checkout -b runtime-diagnostics-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish runtime diagnostics'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin runtime-diagnostics-status|Out-Null;Pop-Location
 
