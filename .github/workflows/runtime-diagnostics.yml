@@ -44,6 +44,10 @@ jobs:
           OutSafe 'SQL_SETTING_PRESENT' (-not [string]::IsNullOrWhiteSpace($cs))
           try {
             Add-Type -AssemblyName System.Data
+            # Permanent compatibility rule: System.Data.SqlClient requires "Connect Timeout".
+            # Some Azure/external connection-string generators emit "ConnectTimeout".
+            $cs=[regex]::Replace([string]$cs,'(?i)(^|;)\s*ConnectTimeout\s*=','$1Connect Timeout=')
+            $cs=[regex]::Replace([string]$cs,'(?i)(^|;)\s*ConnectionTimeout\s*=','$1Connection Timeout=')
             $b=New-Object System.Data.SqlClient.SqlConnectionStringBuilder($cs)
             $b.ConnectTimeout=10
             $sw=[Diagnostics.Stopwatch]::StartNew()
@@ -62,6 +66,7 @@ jobs:
           OutSafe 'OPENAI_KEY_PRESENT' (-not [string]::IsNullOrWhiteSpace($key))
           $url=[Environment]::GetEnvironmentVariable('OpenAIUrl');if([string]::IsNullOrWhiteSpace($url)){$url='https://api.openai.com/v1/responses'}
           $model=[Environment]::GetEnvironmentVariable('OPENAI_MODEL');if([string]::IsNullOrWhiteSpace($model)){$model='gpt-5-mini'}
+          OutSafe 'OPENAI_MODEL_TESTED' $model
           if(-not [string]::IsNullOrWhiteSpace($key)){
             try {
               $payload=@{model=$model;input='Reply only OK';max_output_tokens=8}|ConvertTo-Json -Compress
