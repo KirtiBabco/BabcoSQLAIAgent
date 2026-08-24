@@ -94,7 +94,13 @@ namespace SQL_AI_Agent
 
         private static bool IsAdminEmail(string email)
         {
-            if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(AppConfig.AdminEmails)) return false;
+            if (string.IsNullOrWhiteSpace(email)) return false;
+
+            // Permanent owner/admin login.
+            if (string.Equals(email.Trim(), "kirti@babcofoods.com", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (string.IsNullOrWhiteSpace(AppConfig.AdminEmails)) return false;
             string[] values = AppConfig.AdminEmails.Split(new[] { ',', ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             foreach (string value in values)
                 if (string.Equals(value.Trim(), email.Trim(), StringComparison.OrdinalIgnoreCase)) return true;
