@@ -1,6 +1,6 @@
 $ErrorActionPreference='Stop'
 $repoRoot=$env:GITHUB_WORKSPACE;$resourceGroup=$env:AZURE_RESOURCE_GROUP;$webApp=$env:WEB_APP;$loginUrl=$env:LOGIN_URL;$defaultUrl=$env:DEFAULT_URL;$easyAuthUrl=$env:EASY_AUTH_URL
-$healthUrl="https://$webApp.azurewebsites.net/HealthCheck.aspx"
+$healthUrl="$loginUrl?health=1"
 $status=[ordered]@{SOURCE_COMMIT=$env:GITHUB_SHA;PACKAGE='failure';OIDC='success';SETTINGS='failure';DEPLOY='failure';BACKEND='failure';VERIFY='failure'}
 $healthToken=''
 function SetS([string]$k,[object]$v){$script:status[$k]=if($null -eq $v){''}else{[string]$v}}
@@ -27,8 +27,8 @@ try{
   $b64=($parts|ForEach-Object{(Get-Content $_.FullName -Raw).Trim()}) -join '';$sourceZip=Join-Path $env:RUNNER_TEMP 'source.zip';[IO.File]::WriteAllBytes($sourceZip,[Convert]::FromBase64String($b64));SetS 'PACKAGE_SHA256' ((Get-FileHash $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant())
   $extract=Join-Path $env:RUNNER_TEMP 'source';if(Test-Path $extract){Remove-Item $extract -Recurse -Force};Expand-Archive $sourceZip $extract -Force;$site=Join-Path $extract 'SQL_AI_Agent';if(-not(Test-Path $site)){throw 'SQL_AI_Agent source folder missing.'}
   $overrides=Join-Path $repoRoot 'deploy-overrides';Get-ChildItem $overrides -Recurse -File|ForEach-Object{$rel=$_.FullName.Substring($overrides.Length).TrimStart([char[]]@('\','/'));$dest=Join-Path $site $rel;$parent=Split-Path $dest -Parent;if(-not(Test-Path $parent)){New-Item -ItemType Directory -Path $parent -Force|Out-Null};Copy-Item $_.FullName $dest -Force};SetS 'OVERRIDES_APPLIED' 'true'
-  foreach($f in @('Login.aspx','Default.aspx','Web.config','HealthCheck.aspx','App_Code\AppConfig.cs','App_Code\AuthService.cs','App_Code\SqlTool.cs','App_Code\AgentService.cs')){if(-not(Test-Path(Join-Path $site $f))){throw "Missing runtime source file: $f"}}
-  $runtime=(Get-Content(Join-Path $site 'Login.aspx')-Raw)+(Get-Content(Join-Path $site 'App_Code\AuthService.cs')-Raw);if($runtime -match 'Local Test Admin Login|Continue Without Microsoft|LOCAL-ADMIN|ENTRA_CLIENT_SECRET'){throw 'Forbidden local auth/custom Entra secret logic present.'}
+  foreach($f in @('Login.aspx','Login.aspx.cs','Default.aspx','Web.config','App_Code\AppConfig.cs','App_Code\AuthService.cs','App_Code\SqlTool.cs','App_Code\AgentService.cs','App_Code\OpenAIClient.cs')){if(-not(Test-Path(Join-Path $site $f))){throw "Missing runtime source file: $f"}}
+  $runtime=(Get-Content(Join-Path $site 'Login.aspx')-Raw)+(Get-Content(Join-Path $site 'Login.aspx.cs')-Raw)+(Get-Content(Join-Path $site 'App_Code\AuthService.cs')-Raw);if($runtime -match 'Local Test Admin Login|Continue Without Microsoft|LOCAL-ADMIN|LocalTestAdminLogin|CanUseLocalTestLogin|btnTemporary|btnLocalTest|ENTRA_CLIENT_SECRET'){throw 'Forbidden local auth/custom Entra secret logic present.'}
   SetS 'SOURCE_LOCAL_ADMIN_REMOVED' 'true';SetS 'SOURCE_EASY_AUTH' 'true';SetS 'SOURCE_GLOBAL_SQL' 'true'
   $zip=Join-Path $env:RUNNER_TEMP 'site.zip';if(Test-Path $zip){Remove-Item $zip -Force};Compress-Archive -Path(Join-Path $site '*') -DestinationPath $zip -Force;SetS 'PACKAGE' 'success';SetS 'PACKAGE_VALID' 'true'
 
@@ -43,20 +43,17 @@ try{
   az webapp start -g $resourceGroup -n $webApp|Out-Null;az webapp deploy -g $resourceGroup -n $webApp --src-path $zip --type zip --clean true --restart true|Out-Null;if($LASTEXITCODE -ne 0){throw 'Azure ZIP deployment failed.'};az webapp restart -g $resourceGroup -n $webApp|Out-Null;SetS 'DEPLOY' 'success'
 
   Start-Sleep -Seconds 20;$health=$null;$lastHealth='';$healthBody=''
-  for($i=1;$i -le 6;$i++){
-    try{$health=Invoke-WebRequest $healthUrl -UseBasicParsing -Headers @{'X-Babco-Health-Token'=$healthToken} -TimeoutSec 150;if([int]$health.StatusCode -eq 200){break}}
-    catch{
-      $lastHealth=$_.Exception.Message;$code=0;try{$code=[int]$_.Exception.Response.StatusCode}catch{};SetS 'HEALTH_HTTP' $code
-      try{$stream=$_.Exception.Response.GetResponseStream();if($stream){$reader=New-Object IO.StreamReader($stream);$healthBody=$reader.ReadToEnd();$reader.Dispose()}}catch{}
-      if($healthBody.Length -gt 1000){$healthBody=$healthBody.Substring(0,1000)}
-      if($healthBody){SetS 'HEALTH_ERROR_BODY' ((One $healthBody)-replace '<[^>]+>',' ')}
-    }
-    Start-Sleep -Seconds 5
+  for($i=1;$i -le 8;$i++){
+    try{$health=Invoke-WebRequest $healthUrl -UseBasicParsing -Headers @{'X-Babco-Health-Token'=$healthToken} -TimeoutSec 90;if([int]$health.StatusCode -eq 200){break}}
+    catch{$lastHealth=$_.Exception.Message;$code=0;try{$code=[int]$_.Exception.Response.StatusCode}catch{};SetS 'HEALTH_HTTP' $code;Start-Sleep -Seconds 5}
   }
-  if($null -eq $health){throw ('HealthCheck.aspx failed: '+(One $lastHealth))}
+  if($null -eq $health){throw ('Login worker health check failed: '+(One $lastHealth))}
   SetS 'HEALTH_HTTP' ([int]$health.StatusCode)
   $lines=$health.Content -split "`r?`n"|Where-Object{$_ -match '^(HEALTH_|SQL_|OPENAI_)'};foreach($line in $lines){Write-Output $line;$p=$line.IndexOf('=');if($p -gt 0){SetS $line.Substring(0,$p) $line.Substring($p+1)}}
-  if(([string]$status.HEALTH_PAGE_OK).ToLowerInvariant() -ne 'true'){throw 'Health page did not execute.'};if(([string]$status.SQL_OK).ToLowerInvariant() -ne 'true'){throw ('SQL runtime smoke test failed: '+$status.SQL_ERROR)};if(([string]$status.OPENAI_OK).ToLowerInvariant() -ne 'true'){throw ('OpenAI runtime smoke test failed: '+$status.OPENAI_ERROR)};SetS 'BACKEND' 'success'
+  if(([string]$status.HEALTH_PAGE_OK).ToLowerInvariant() -ne 'true'){throw 'Login worker health mode did not execute.'}
+  if(([string]$status.SQL_OK).ToLowerInvariant() -ne 'true'){throw ("SQL runtime smoke test failed: classification=$($status.SQL_ERROR_CLASSIFICATION) number=$($status.SQL_ERROR_NUMBER) type=$($status.SQL_ERROR_TYPE)")}
+  if(([string]$status.OPENAI_OK).ToLowerInvariant() -ne 'true'){throw ('OpenAI runtime smoke test failed: '+$status.OPENAI_ERROR)}
+  SetS 'BACKEND' 'success'
   RemoveHealthToken;Start-Sleep -Seconds 10
 
   $login=$null;for($i=1;$i -le 24;$i++){try{$login=Invoke-WebRequest $loginUrl -UseBasicParsing -TimeoutSec 30;if([int]$login.StatusCode -eq 200){break}}catch{};Start-Sleep -Seconds 5};if($null -eq $login){throw 'Login.aspx unhealthy.'};SetS 'LOGIN_HTTP' 200
