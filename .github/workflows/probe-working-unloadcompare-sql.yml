@@ -1,0 +1,59 @@
+name: Probe Working UnloadCompare SQL
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/probe-working-unloadcompare-sql.yml'
+      - 'ops/probe-working-unloadcompare-sql.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: 7a21e1b8-ee78-429e-8051-5dce354e3e1d
+  AZURE_TENANT_ID: 7e3bfe8e-acb5-4e0e-9798-c05331d2940c
+  AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
+  RG: rg-babco-rnd-sandbox
+  SOURCE_APP: app-babco-unloadcompare-0e27b0b7-260818
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+      - name: Probe safe setting metadata
+        shell: pwsh
+        run: |
+          $out=Join-Path $env:RUNNER_TEMP 'probe.txt'
+          "SOURCE_COMMIT=$env:GITHUB_SHA"|Set-Content $out
+          $conn=az webapp config connection-string list -g $env:RG -n $env:SOURCE_APP -o json --only-show-errors|ConvertFrom-Json
+          $apps=az webapp config appsettings list -g $env:RG -n $env:SOURCE_APP -o json --only-show-errors|ConvertFrom-Json
+          foreach($name in @('BabcoSupportConnectionString','BAP_SUPPORT_CONNECTION_STRING','SQL_BAP_SUPPORT_CONNECTION_STRING','SQL_CONNECTION_STRING')){
+            $c=@($conn|Where-Object name -eq $name|Select-Object -First 1)
+            $a=@($apps|Where-Object name -eq $name|Select-Object -First 1)
+            Add-Content $out ("CONNECTION_"+$name+"_PRESENT="+($c.Count -gt 0))
+            Add-Content $out ("APPSETTING_"+$name+"_PRESENT="+($a.Count -gt 0))
+            $v='';$kind=''
+            if($c.Count -gt 0){$v=[string]$c[0].value;$kind='CONNECTION'}elseif($a.Count -gt 0){$v=[string]$a[0].value;$kind='APPSETTING'}
+            if($v){
+              Write-Output "::add-mask::$v"
+              try{$v=[regex]::Replace($v,'(?i)\bConnectTimeout\s*=','Connect Timeout=');$b=New-Object System.Data.SqlClient.SqlConnectionStringBuilder($v);Add-Content $out ("SOURCE_KEY="+$name);Add-Content $out ("SOURCE_KIND="+$kind);Add-Content $out ("SOURCE_HOST="+$b.DataSource);Add-Content $out ("SOURCE_DB="+$b.InitialCatalog)}catch{}
+            }
+          }
+      - name: Publish probe
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $d=Join-Path $env:RUNNER_TEMP 'pub';New-Item -ItemType Directory -Path $d -Force|Out-Null
+          $p=Join-Path $env:RUNNER_TEMP 'probe.txt';if(Test-Path $p){Copy-Item $p (Join-Path $d 'status.txt')}else{'PROBE_FAILED=true'|Set-Content (Join-Path $d 'status.txt')}
+          Push-Location $d;git init|Out-Null;git checkout -b working-unloadcompare-sql-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish working UnloadCompare SQL probe'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin working-unloadcompare-sql-status|Out-Null;Pop-Location
