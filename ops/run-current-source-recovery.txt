@@ -1,1 +1,1 @@
-Retry final full recovery using actual working Babco setting source from app-babco-unloadcompare-0e27b0b7-260818. Require SQL, OpenAI, Login and Entra PASS.
+Deploy current source plus Health.aspx, mirror actual working Babco setting from app-babco-unloadcompare-0e27b0b7-260818, then verify via actual Web App process.
