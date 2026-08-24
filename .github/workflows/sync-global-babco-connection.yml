@@ -20,7 +20,7 @@ env:
   AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
   RESOURCE_GROUP: 'rg-babco-rnd-sandbox'
   TARGET_APP: 'babco-sqlagent-wf-2c606af4'
-  SOURCE_APP: 'app-babco-unloadcompare-0e27b0b7-260814'
+  SOURCE_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
   SOURCE_CONNECTION_NAME: 'BabcoSupportConnectionString'
 
 jobs:
@@ -81,17 +81,6 @@ PY
           echo "::add-mask::$pass"
           echo "KUDU_CREDENTIALS=true" >> "$status"
 
-          cmd='$f="D:\home\site\wwwroot\App_Code\PricingCalculator.cs"; if(Test-Path $f){Remove-Item $f -Force; Write-Output "STALE_PRICINGCALCULATOR=removed"} else {Write-Output "STALE_PRICINGCALCULATOR=not_present"}'
-          body="$(jq -nc --arg c "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $cmd" '{command:$c,dir:"site\\wwwroot"}')"
-          kudu="https://${TARGET_APP}.scm.azurewebsites.net/api/command"
-          cleanup="$(curl -fsS --retry 3 --retry-delay 3 -u "$user:$pass" -H 'Content-Type: application/json' -d "$body" "$kudu")"
-          cleanup_out="$(jq -r '.Output // empty' <<< "$cleanup" | tr '\r\n' ' ')"
-          if grep -q 'STALE_PRICINGCALCULATOR=removed' <<< "$cleanup_out"; then
-            echo "STALE_PRICINGCALCULATOR=removed" >> "$status"
-          else
-            echo "STALE_PRICINGCALCULATOR=not_present" >> "$status"
-          fi
-
           az webapp restart -g "$RESOURCE_GROUP" -n "$TARGET_APP" --only-show-errors >/dev/null
           echo "SYNC=success" >> "$status"
 
@@ -108,17 +97,16 @@ PY
 
           sqlcmd='$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Data; $cs=[Environment]::GetEnvironmentVariable("BAP_SUPPORT_CONNECTION_STRING"); $cs=[regex]::Replace($cs,"(?i)\\bConnectTimeout\\s*=","Connect Timeout="); $cs=[regex]::Replace($cs,"(?i)\\bConnectionTimeout\\s*=","Connection Timeout="); $cs=[regex]::Replace($cs,"(?i)(^|;)\\s*Timeout\\s*=","$1Connect Timeout="); try{$b=New-Object System.Data.SqlClient.SqlConnectionStringBuilder($cs); $b.ConnectTimeout=12; $c=New-Object System.Data.SqlClient.SqlConnection($b.ConnectionString); $c.Open(); $q=$c.CreateCommand(); $q.CommandTimeout=12; $q.CommandText="SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES"; $n=$q.ExecuteScalar(); $c.Close(); Write-Output "SQL_OK=true"; Write-Output "SQL_TABLE_COUNT=$n"; Write-Output ("SQL_SERVER_HOST="+$b.DataSource)}catch{Write-Output "SQL_OK=false"; Write-Output ("SQL_ERROR_TYPE="+$_.Exception.GetType().Name); Write-Output ("SQL_ERROR="+($_.Exception.Message -replace "[\\r\\n]+"," "))}'
           sqlbody="$(jq -nc --arg c "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $sqlcmd" '{command:$c,dir:"site\\wwwroot"}')"
-          sqlres="$(curl -fsS --retry 2 --retry-delay 3 -u "$user:$pass" -H 'Content-Type: application/json' -d "$sqlbody" "$kudu")"
+          sqlres="$(curl -fsS --retry 2 --retry-delay 3 -u "$user:$pass" -H 'Content-Type: application/json' -d "$sqlbody" "https://${TARGET_APP}.scm.azurewebsites.net/api/command")"
           jq -r '.Output // empty' <<< "$sqlres" | grep -E '^SQL_' >> "$status" || true
 
           openaicmd='$ErrorActionPreference="Stop"; $k=[Environment]::GetEnvironmentVariable("OPENAI_API_KEY_DEVELOPMENT"); if([string]::IsNullOrWhiteSpace($k)){Write-Output "OPENAI_OK=false";exit}; try{$p=@{model="gpt-5-mini";input="Reply only OK";max_output_tokens=16}|ConvertTo-Json -Compress; $r=Invoke-WebRequest -Method Post -Uri "https://api.openai.com/v1/responses" -Headers @{Authorization=("Bearer "+$k)} -ContentType "application/json" -Body $p -UseBasicParsing -TimeoutSec 30; Write-Output "OPENAI_OK=true"; Write-Output ("OPENAI_HTTP="+[int]$r.StatusCode)}catch{$code=0;try{$code=[int]$_.Exception.Response.StatusCode}catch{};Write-Output "OPENAI_OK=false";Write-Output ("OPENAI_HTTP="+$code)}'
           openaibody="$(jq -nc --arg c "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $openaicmd" '{command:$c,dir:"site\\wwwroot"}')"
-          openaires="$(curl -fsS --retry 2 --retry-delay 3 -u "$user:$pass" -H 'Content-Type: application/json' -d "$openaibody" "$kudu")"
+          openaires="$(curl -fsS --retry 2 --retry-delay 3 -u "$user:$pass" -H 'Content-Type: application/json' -d "$openaibody" "https://${TARGET_APP}.scm.azurewebsites.net/api/command")"
           jq -r '.Output // empty' <<< "$openaires" | grep -E '^OPENAI_' >> "$status" || true
 
           if [ "$login_code" = "200" ]; then echo "SITE_OK=true" >> "$status"; else echo "SITE_OK=false" >> "$status"; fi
           echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$status"
-          cat "$status"
 
       - name: Publish safe sync status
         if: always()
