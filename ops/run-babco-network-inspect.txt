@@ -1,1 +1,1 @@
-Inspect app-babco-unloadcompare-0e27b0b7-260818 and babco-sqlagent-wf-2c606af4 hybrid connection state after current source switch.
+Create/reuse relay-babco-unloadcompare-0e27b0b7 and hc-babco-sql for DESKTOP-RGFJ2N8:1433, attach babco-sqlagent-wf-2c606af4, then inspect status.
