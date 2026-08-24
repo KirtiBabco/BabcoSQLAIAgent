@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Configuration;
 using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace SQL_AI_Agent
 {
@@ -26,11 +27,11 @@ namespace SQL_AI_Agent
             {
                 EnvironmentSecretInfo info = GetOpenAIApiKeyInfo();
                 if (!info.IsPresent)
-                    throw new Exception(OpenAIApiKeyVariable + " environment variable was not found. Create it in Windows Environment Variables and restart Visual Studio/IIS Express.");
+                    throw new Exception(OpenAIApiKeyVariable + " environment variable was not found. Configure it as an Azure App Service environment variable and restart the app.");
                 if (info.Value.IndexOf(' ') >= 0)
                     throw new Exception(OpenAIApiKeyVariable + " contains a space. Store only the API key value, without 'Bearer ', variable-name text, or extra spaces.");
                 if (!info.Value.StartsWith("sk-", StringComparison.Ordinal))
-                    throw new Exception(OpenAIApiKeyVariable + " does not look like an OpenAI API Platform key. Expected a key beginning with 'sk-'. Do not paste a ChatGPT session token.");
+                    throw new Exception(OpenAIApiKeyVariable + " does not look like an OpenAI API Platform key. Expected a key beginning with 'sk-'.");
                 return info.Value;
             }
         }
@@ -40,9 +41,17 @@ namespace SQL_AI_Agent
             return GetEnvironmentSecretInfo(OpenAIApiKeyVariable);
         }
 
-        public static string OpenAIModel { get { return Get("OpenAIModel", "gpt-5.6-sol"); } }
+        public static string OpenAIModel
+        {
+            get
+            {
+                string model = GetEnvironmentOrConfig("OPENAI_MODEL", "OpenAIModel");
+                return string.IsNullOrWhiteSpace(model) ? "gpt-5-mini" : model.Trim();
+            }
+        }
+
         public static bool OpenAIAllowModelFallback { get { return GetBool("OpenAIAllowModelFallback", true); } }
-        public static string OpenAIModelFallbacks { get { return Get("OpenAIModelFallbacks", "gpt-5.6,gpt-5.6-terra,gpt-5.6-luna,gpt-5.4,gpt-5-mini,gpt-4o-mini"); } }
+        public static string OpenAIModelFallbacks { get { return Get("OpenAIModelFallbacks", "gpt-5-mini,gpt-4o-mini"); } }
         public static int OpenAIModelCacheMinutes { get { return GetInt("OpenAIModelCacheMinutes", 5); } }
         public static int OpenAIQuotaCooldownMinutes { get { return GetInt("OpenAIQuotaCooldownMinutes", 15); } }
 
@@ -50,8 +59,6 @@ namespace SQL_AI_Agent
         {
             var result = new List<string>();
             AddUnique(result, OpenAIModel);
-            if (string.Equals(OpenAIModel, "gpt-5.6", StringComparison.OrdinalIgnoreCase)) AddUnique(result, "gpt-5.6-sol");
-            if (string.Equals(OpenAIModel, "gpt-5.6-sol", StringComparison.OrdinalIgnoreCase)) AddUnique(result, "gpt-5.6");
             if (OpenAIAllowModelFallback)
             {
                 string[] fallbacks = (OpenAIModelFallbacks ?? "").Split(new[] { ',', ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
@@ -60,7 +67,15 @@ namespace SQL_AI_Agent
             return result;
         }
 
-        public static string SqlConnectionString { get { return GetEnvironmentSecretInfo(SqlConnectionVariable).Value; } }
+        public static string SqlConnectionString
+        {
+            get
+            {
+                string value = GetEnvironmentSecretInfo(SqlConnectionVariable).Value;
+                return NormalizeSqlConnectionString(value);
+            }
+        }
+
         public static int MaxRows { get { return GetInt("MaxRows", 200); } }
         public static int CommandTimeoutSeconds { get { return GetInt("CommandTimeoutSeconds", 30); } }
         public static string AdminEmails { get { return GetEnvironmentOrConfig("AI_SQL_AGENT_ADMIN_EMAILS", "AdminEmails"); } }
@@ -106,6 +121,17 @@ namespace SQL_AI_Agent
             if (value.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) value = value.Substring(7).Trim();
             if (value.Length >= 2 && ((value[0] == '"' && value[value.Length - 1] == '"') || (value[0] == '\'' && value[value.Length - 1] == '\''))) value = value.Substring(1, value.Length - 2).Trim();
             return value.Replace("\r", "").Replace("\n", "").Replace("\t", "").Trim();
+        }
+
+        private static string NormalizeSqlConnectionString(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "";
+
+            // Azure/other tooling sometimes emits ConnectTimeout without a space.
+            // System.Data.SqlClient (.NET Framework) requires Connect Timeout / Connection Timeout.
+            value = Regex.Replace(value, @"(?i)(^|;)\s*ConnectTimeout\s*=", "$1Connect Timeout=");
+            value = Regex.Replace(value, @"(?i)(^|;)\s*ConnectionTimeout\s*=", "$1Connection Timeout=");
+            return value.Trim();
         }
 
         private static string MaskSecret(string value)

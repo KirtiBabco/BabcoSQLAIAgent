@@ -44,6 +44,10 @@ jobs:
           OutSafe 'SQL_SETTING_PRESENT' (-not [string]::IsNullOrWhiteSpace($cs))
           try {
             Add-Type -AssemblyName System.Data
+            # Permanent compatibility rule: System.Data.SqlClient requires "Connect Timeout".
+            # Some Azure/external connection-string generators emit "ConnectTimeout".
+            $cs=[regex]::Replace([string]$cs,'(?i)(^|;)\s*ConnectTimeout\s*=','$1Connect Timeout=')
+            $cs=[regex]::Replace([string]$cs,'(?i)(^|;)\s*ConnectionTimeout\s*=','$1Connection Timeout=')
             $b=New-Object System.Data.SqlClient.SqlConnectionStringBuilder($cs)
             $b.ConnectTimeout=10
             $sw=[Diagnostics.Stopwatch]::StartNew()
@@ -62,6 +66,7 @@ jobs:
           OutSafe 'OPENAI_KEY_PRESENT' (-not [string]::IsNullOrWhiteSpace($key))
           $url=[Environment]::GetEnvironmentVariable('OpenAIUrl');if([string]::IsNullOrWhiteSpace($url)){$url='https://api.openai.com/v1/responses'}
           $model=[Environment]::GetEnvironmentVariable('OPENAI_MODEL');if([string]::IsNullOrWhiteSpace($model)){$model='gpt-5-mini'}
+          OutSafe 'OPENAI_MODEL_TESTED' $model
           if(-not [string]::IsNullOrWhiteSpace($key)){
             try {
               $payload=@{model=$model;input='Reply only OK';max_output_tokens=8}|ConvertTo-Json -Compress
@@ -95,3 +100,14 @@ jobs:
           Add-Content (Join-Path $d 'status.txt') "SOURCE_COMMIT=$env:GITHUB_SHA"
           Add-Content (Join-Path $d 'status.txt') "CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
           Push-Location $d;git init|Out-Null;git checkout -b runtime-diagnostics-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish runtime diagnostics'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin runtime-diagnostics-status|Out-Null;Pop-Location
+
+      - name: Require healthy SQL and OpenAI dependencies
+        if: always()
+        shell: pwsh
+        run: |
+          $p=Join-Path $env:RUNNER_TEMP 'runtime-status.txt'
+          if(-not (Test-Path $p)){throw 'Runtime diagnostic output was not produced.'}
+          $status=Get-Content $p
+          if(-not ($status -match '^SQL_OK=true$')){throw 'SQL runtime smoke test failed. See runtime-diagnostics-status/status.txt.'}
+          if(-not ($status -match '^OPENAI_KEY_PRESENT=True$')){throw 'OPENAI_API_KEY_DEVELOPMENT is not available to the App Service process.'}
+          if(-not ($status -match '^OPENAI_OK=True$')){throw 'OpenAI runtime smoke test failed. See runtime-diagnostics-status/status.txt.'}
