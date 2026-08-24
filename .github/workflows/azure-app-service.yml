@@ -68,7 +68,7 @@ jobs:
             --only-show-errors | Out-Null
           Write-Host "GLOBAL_BABCO_CONNECTION=applied_normalized"
 
-      - name: Remove stale App_Code files before deployment
+      - name: Remove old live App_Code before fresh deployment
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -81,32 +81,18 @@ jobs:
           Write-Output "::add-mask::$pass"
           $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($user+':'+$pass))
           $repair=@'
-          $ErrorActionPreference='Stop'
-          $stale=@('D:\home\site\wwwroot\App_Code\PricingCalculator.cs')
-          foreach($f in $stale){
-            if(Test-Path $f){ Remove-Item $f -Force; Write-Output ('REMOVED_STALE='+$f) }
+          $ErrorActionPreference='Continue'
+          foreach($dir in @('C:\home\site\wwwroot\App_Code','D:\home\site\wwwroot\App_Code')){
+            if(Test-Path $dir){
+              try{Remove-Item $dir -Recurse -Force -ErrorAction Stop;Write-Output ('APP_CODE_CLEAN='+$dir+'=removed')}catch{Write-Output ('APP_CODE_CLEAN='+$dir+'=failed:'+($_.Exception.Message -replace '[\r\n]+',' '))}
+            }else{Write-Output ('APP_CODE_CLEAN='+$dir+'=not_present')}
           }
-          $web='D:\home\site\wwwroot\Web.config'
-          if(Test-Path $web){ (Get-Item $web).LastWriteTime=Get-Date }
           '@
           $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($repair))
           $body=@{command="powershell -NoProfile -NonInteractive -EncodedCommand $encoded";dir='site\\wwwroot'} | ConvertTo-Json -Compress
           $uri="https://$env:WEB_APP.scm.azurewebsites.net/api/command"
           $result=Invoke-RestMethod -Method Post -Uri $uri -Headers @{Authorization="Basic $basic"} -ContentType 'application/json' -Body $body -TimeoutSec 120
           Write-Host ([string]$result.Output)
-          az webapp restart -g $env:AZURE_RESOURCE_GROUP -n $env:WEB_APP --only-show-errors | Out-Null
-
-      - name: Confirm Login compiles before deployment
-        shell: pwsh
-        run: |
-          $code=0
-          for($i=1;$i -le 30;$i++){
-            try{$r=Invoke-WebRequest -Uri $env:LOGIN_URL -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 20;$code=[int]$r.StatusCode}catch{$code=0}
-            if($code -eq 200){break}
-            Start-Sleep -Seconds 4
-          }
-          Write-Host "PREDEPLOY_LOGIN_HTTP=$code"
-          if($code -ne 200){throw 'Login did not recover after stale-file cleanup.'}
 
       - name: Deploy full source and require live SQL OpenAI Entra health
         shell: pwsh
