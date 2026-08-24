@@ -1,1 +1,1 @@
-Run final full recovery using current supplied ZIP and mirror working BabcoSupportConnectionString from app-babco-unloadcompare-0e27b0b7-260818. Require SQL, OpenAI, Login and Entra PASS.
+Retry final full recovery using actual working Babco setting source from app-babco-unloadcompare-0e27b0b7-260818. Require SQL, OpenAI, Login and Entra PASS.
