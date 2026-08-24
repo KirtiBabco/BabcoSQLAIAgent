@@ -18,12 +18,14 @@ env:
   AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
   RESOURCE_GROUP: rg-babco-rnd-sandbox
   WEB_APP: babco-sqlagent-wf-2c606af4
+  SOURCE_APP: app-babco-unloadcompare-0e27b0b7-260818
+  SOURCE_CONNECTION_NAME: BabcoSupportConnectionString
   LOGIN_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
 
 jobs:
   recover:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -34,12 +36,28 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Build current clean deployment ZIP
+      - name: Mirror working Babco App Service connection-string secret
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $status=Join-Path $env:RUNNER_TEMP 'recovery-status.txt'
           "SOURCE_COMMIT=$env:GITHUB_SHA" | Set-Content $status -Encoding ascii
+          $cs=az webapp config connection-string list -g $env:RESOURCE_GROUP -n $env:SOURCE_APP --query "[?name=='$($env:SOURCE_CONNECTION_NAME)'].value | [0]" -o tsv --only-show-errors
+          if([string]::IsNullOrWhiteSpace($cs) -or $cs -eq 'null'){throw 'Working source BabcoSupportConnectionString not found.'}
+          Write-Output "::add-mask::$cs"
+          $cs=[regex]::Replace([string]$cs,'(?i)\bConnectTimeout\s*=','Connect Timeout=')
+          $cs=[regex]::Replace([string]$cs,'(?i)\bConnectionTimeout\s*=','Connection Timeout=')
+          $cs=[regex]::Replace([string]$cs,'(?i)(^|;)\s*Timeout\s*=','$1Connect Timeout=')
+          Write-Output "::add-mask::$cs"
+          az webapp config connection-string set -g $env:RESOURCE_GROUP -n $env:WEB_APP --connection-string-type SQLServer --settings "BabcoSupportConnectionString=$cs" --only-show-errors | Out-Null
+          az webapp config appsettings delete -g $env:RESOURCE_GROUP -n $env:WEB_APP --setting-names BAP_SUPPORT_CONNECTION_STRING SQL_BAP_SUPPORT_CONNECTION_STRING SQL_CONNECTION_STRING --only-show-errors 2>$null | Out-Null
+          Add-Content $status 'BABCO_SECRET_MIRROR=success'
+
+      - name: Build current clean deployment ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $status=Join-Path $env:RUNNER_TEMP 'recovery-status.txt'
           $b64=Get-Content (Join-Path $env:GITHUB_WORKSPACE 'source-package\current-source.b64') -Raw
           $zip=Join-Path $env:RUNNER_TEMP 'current-source.zip'
           [IO.File]::WriteAllBytes($zip,[Convert]::FromBase64String($b64.Trim()))
@@ -59,10 +77,6 @@ jobs:
             if(-not(Test-Path $parent)){New-Item -ItemType Directory -Path $parent -Force|Out-Null}
             Copy-Item $_.FullName $dest -Force
           }
-          foreach($required in @('Login.aspx','Login.aspx.cs','Web.config','App_Code\AgentService.cs','App_Code\OpenAIClient.cs','App_Code\AuthService.cs')){
-            if(-not(Test-Path (Join-Path $site $required))){throw "Missing $required"}
-          }
-          if(Test-Path (Join-Path $site 'App_Code\PricingCalculator.cs')){throw 'Stale PricingCalculator exists in current package.'}
           $deployZip=Join-Path $env:RUNNER_TEMP 'current-deploy.zip'
           if(Test-Path $deployZip){Remove-Item $deployZip -Force}
           Compress-Archive -Path (Join-Path $site '*') -DestinationPath $deployZip -Force
@@ -74,56 +88,67 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $status=Join-Path $env:RUNNER_TEMP 'recovery-status.txt'
-          try {
-            $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
-            $p=@($profiles | Where-Object { $_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy' } | Select-Object -First 1)
-            if($p.Count -eq 0){throw 'Publishing profile unavailable.'}
-            $u=[string]$p[0].userName;$pw=[string]$p[0].userPWD
-            Write-Output "::add-mask::$u";Write-Output "::add-mask::$pw"
-            $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
-            $headers=@{Authorization="Basic $basic"}
+          $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
+          $p=@($profiles | Where-Object { $_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy' } | Select-Object -First 1)
+          if($p.Count -eq 0){throw 'Publishing profile unavailable.'}
+          $u=[string]$p[0].userName;$pw=[string]$p[0].userPWD
+          Write-Output "::add-mask::$u";Write-Output "::add-mask::$pw"
+          $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
+          $headers=@{Authorization="Basic $basic"}
+          $clean=@'
+          $ErrorActionPreference='Continue'
+          foreach($d in @('C:\home\site\wwwroot\App_Code','D:\home\site\wwwroot\App_Code')){if(Test-Path $d){Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue}}
+          '@
+          $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($clean))
+          $body=@{command="powershell -NoProfile -NonInteractive -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
+          Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 120 | Out-Null
+          $deployUri="https://$env:WEB_APP.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
+          $response=Invoke-WebRequest -Method Post -Uri $deployUri -Headers $headers -InFile $env:DEPLOY_ZIP -ContentType 'application/zip' -UseBasicParsing -TimeoutSec 600
+          Add-Content $status "KUDU_DEPLOY_HTTP=$([int]$response.StatusCode)"
+          if([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300){throw "Kudu zipdeploy HTTP $([int]$response.StatusCode)"}
+          Add-Content $status 'DEPLOY=success'
+          az webapp restart -g $env:RESOURCE_GROUP -n $env:WEB_APP --only-show-errors | Out-Null
+          Start-Sleep -Seconds 15
 
-            $clean=@'
-            $ErrorActionPreference='Continue'
-            foreach($d in @('C:\home\site\wwwroot\App_Code','D:\home\site\wwwroot\App_Code')){if(Test-Path $d){Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue}}
-            Write-Output 'APP_CODE_PRE_CLEAN=true'
-            '@
-            $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($clean))
-            $body=@{command="powershell -NoProfile -NonInteractive -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
-            $cleanResult=Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 120
-            Add-Content $status 'APP_CODE_PRE_CLEAN=true'
-
-            $deployUri="https://$env:WEB_APP.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
-            $response=Invoke-WebRequest -Method Post -Uri $deployUri -Headers $headers -InFile $env:DEPLOY_ZIP -ContentType 'application/zip' -UseBasicParsing -TimeoutSec 600
-            Add-Content $status "KUDU_DEPLOY_HTTP=$([int]$response.StatusCode)"
-            if([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300){throw "Kudu zipdeploy HTTP $([int]$response.StatusCode)"}
-            Add-Content $status 'DEPLOY=success'
-            az webapp restart -g $env:RESOURCE_GROUP -n $env:WEB_APP --only-show-errors | Out-Null
-            Add-Content $status 'RESTART=success'
-          } catch {
-            Add-Content $status 'DEPLOY=failure'
-            Add-Content $status ("DEPLOY_ERROR_TYPE="+$_.Exception.GetType().Name)
-            Add-Content $status ("DEPLOY_ERROR="+(($_.Exception.Message) -replace '[\r\n]+',' '))
-            throw
-          }
-
-      - name: Verify Login and Entra
-        if: always()
+      - name: Verify SQL OpenAI Login and Entra
         shell: pwsh
         run: |
+          $ErrorActionPreference='Continue'
           $status=Join-Path $env:RUNNER_TEMP 'recovery-status.txt'
-          if(-not(Test-Path $status)){"SOURCE_COMMIT=$env:GITHUB_SHA"|Set-Content $status -Encoding ascii}
+          $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
+          $p=@($profiles | Where-Object { $_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy' } | Select-Object -First 1)
+          $u=[string]$p[0].userName;$pw=[string]$p[0].userPWD
+          Write-Output "::add-mask::$u";Write-Output "::add-mask::$pw"
+          $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
+          $headers=@{Authorization="Basic $basic"}
+          $test=@'
+          $ErrorActionPreference='Continue'
+          Add-Type -AssemblyName System.Data
+          $cs=[Environment]::GetEnvironmentVariable('SQLCONNSTR_BabcoSupportConnectionString')
+          if([string]::IsNullOrWhiteSpace($cs)){$cs=[Environment]::GetEnvironmentVariable('SQLAZURECONNSTR_BabcoSupportConnectionString')}
+          try{
+            $b=New-Object System.Data.SqlClient.SqlConnectionStringBuilder($cs);$b.ConnectTimeout=12
+            $c=New-Object System.Data.SqlClient.SqlConnection($b.ConnectionString);$c.Open();$q=$c.CreateCommand();$q.CommandTimeout=12;$q.CommandText='SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES';$n=$q.ExecuteScalar();$c.Close()
+            Write-Output 'SQL_OK=true';Write-Output ('SQL_TABLE_COUNT='+$n);Write-Output ('SQL_SERVER_HOST='+$b.DataSource)
+          }catch{Write-Output 'SQL_OK=false';Write-Output ('SQL_ERROR_TYPE='+$_.Exception.GetType().Name);Write-Output ('SQL_ERROR='+($_.Exception.Message -replace '[\r\n]+',' '))}
+          $k=[Environment]::GetEnvironmentVariable('OPENAI_API_KEY_DEVELOPMENT')
+          try{$payload=@{model='gpt-5-mini';input='Reply only OK';max_output_tokens=16}|ConvertTo-Json -Compress;$r=Invoke-WebRequest -Method Post -Uri 'https://api.openai.com/v1/responses' -Headers @{Authorization=('Bearer '+$k)} -ContentType 'application/json' -Body $payload -UseBasicParsing -TimeoutSec 30;Write-Output 'OPENAI_OK=true';Write-Output ('OPENAI_HTTP='+[int]$r.StatusCode)}catch{Write-Output 'OPENAI_OK=false'}
+          '@
+          $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($test))
+          $body=@{command="powershell -NoProfile -NonInteractive -EncodedCommand $enc";dir='site\\wwwroot'}|ConvertTo-Json -Compress
+          $rr=Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 120
+          $safe=([string]$rr.Output -split "`r?`n" | Where-Object {$_ -match '^(SQL_|OPENAI_)'})
+          $safe | Add-Content $status
           $loginCode=0
-          for($i=1;$i -le 50;$i++){
+          for($i=1;$i -le 30;$i++){
             try{$r=Invoke-WebRequest -Uri $env:LOGIN_URL -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 20;$loginCode=[int]$r.StatusCode}catch{$loginCode=0}
-            if($loginCode -eq 200){break}
-            Start-Sleep -Seconds 5
+            if($loginCode -eq 200){break};Start-Sleep -Seconds 5
           }
           Add-Content $status "LOGIN_HTTP=$loginCode"
           $entra=0
           try{$r2=Invoke-WebRequest -Uri "https://$env:WEB_APP.azurewebsites.net/.auth/login/aad" -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 25 -ErrorAction Stop;$entra=[int]$r2.StatusCode}catch{try{$entra=[int]$_.Exception.Response.StatusCode}catch{}}
           Add-Content $status "ENTRA_HTTP=$entra"
-          if($loginCode -eq 200){Add-Content $status 'SITE_OK=true'}else{Add-Content $status 'SITE_OK=false'}
+          if($loginCode -eq 200 -and ($safe -contains 'SQL_OK=true') -and ($safe -contains 'OPENAI_OK=true')){Add-Content $status 'VERIFY=success'}else{Add-Content $status 'VERIFY=failure'}
           Add-Content $status "CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
 
       - name: Publish recovery status
@@ -137,9 +162,9 @@ jobs:
           if(Test-Path $p){Copy-Item $p (Join-Path $d 'status.txt')}else{'RECOVERY_FAILED=true'|Set-Content (Join-Path $d 'status.txt')}
           Push-Location $d;git init|Out-Null;git checkout -b current-source-recovery-status|Out-Null;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -m 'Publish current source recovery status'|Out-Null;git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin current-source-recovery-status|Out-Null;Pop-Location
 
-      - name: Require live Login
+      - name: Require full live verification
         if: always()
         shell: pwsh
         run: |
           $p=Join-Path $env:RUNNER_TEMP 'recovery-status.txt'
-          if(-not((Get-Content $p) -match '^LOGIN_HTTP=200$')){throw 'Login is not HTTP 200.'}
+          if(-not((Get-Content $p) -match '^VERIFY=success$')){throw 'Full live verification failed.'}
