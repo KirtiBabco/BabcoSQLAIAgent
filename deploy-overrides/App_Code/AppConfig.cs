@@ -126,9 +126,15 @@ namespace SQL_AI_Agent
         private static string NormalizeSqlConnectionString(string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return "";
+            value = value.Trim();
 
-            // System.Data.SqlClient does not accept the compact ConnectTimeout alias.
-            // Normalize it anywhere in the string, case-insensitively, before SqlConnection parses it.
+            // Azure/shared configuration can accidentally store a copied wrapper such as
+            // ConnectionString=Server=...; System.Data.SqlClient treats that wrapper as an invalid keyword.
+            value = Regex.Replace(value, @"(?i)^\s*ConnectionString\s*=\s*", "");
+            if (value.Length >= 2 && ((value[0] == '"' && value[value.Length - 1] == '"') || (value[0] == '\'' && value[value.Length - 1] == '\'')))
+                value = value.Substring(1, value.Length - 2).Trim();
+
+            // Normalize compact timeout aliases before SqlConnection parses the value.
             value = Regex.Replace(value, @"(?i)\bConnectTimeout\s*=", "Connect Timeout=");
             value = Regex.Replace(value, @"(?i)\bConnectionTimeout\s*=", "Connection Timeout=");
             return value.Trim();
