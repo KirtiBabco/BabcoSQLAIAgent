@@ -1,0 +1,1 @@
+trigger runtime diagnostics after workflow install 2026-08-24
