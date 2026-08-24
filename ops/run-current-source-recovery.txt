@@ -1,1 +1,1 @@
-Deploy current source plus Health.aspx, mirror actual working Babco setting from app-babco-unloadcompare-0e27b0b7-260818, then verify via actual Web App process.
+Deploy current source with kirti@babcofoods.com hardcoded as Admin, preserve working Babco SQL mirror, and verify Login/Entra.
