@@ -1,0 +1,1 @@
+Run final live repair: normalize global Babco connection, remove stale PricingCalculator.cs, restart App Service, verify Login, Entra, SQL, and OpenAI.
