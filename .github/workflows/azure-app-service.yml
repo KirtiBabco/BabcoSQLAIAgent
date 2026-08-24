@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 # Production deployments are serialized; only the newest run may deploy/restart the App Service.
-# SQL health runs from the App Service/Kudu sandbox; OpenAI and Entra are verified independently.
+# The global Babco support connection is reused from the established UnloadCompare App Service.
 concurrency:
   group: babco-sqlagent-production
   cancel-in-progress: true
@@ -21,6 +21,8 @@ env:
   AZURE_SUBSCRIPTION_ID: 0e27b0b7-22b9-4e96-8faa-897ca9f09e9c
   AZURE_RESOURCE_GROUP: rg-babco-rnd-sandbox
   WEB_APP: babco-sqlagent-wf-2c606af4
+  GLOBAL_BABCO_SOURCE_APP: app-babco-unloadcompare-0e27b0b7-260814
+  GLOBAL_BABCO_CONNECTION_NAME: BabcoSupportConnectionString
   LOGIN_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx
   DEFAULT_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Default.aspx
   EASY_AUTH_URL: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad
@@ -39,6 +41,31 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
+
+      - name: Reuse global Babco support connection
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bap = az webapp config connection-string list `
+            -g $env:AZURE_RESOURCE_GROUP `
+            -n $env:GLOBAL_BABCO_SOURCE_APP `
+            --query "[?name=='$($env:GLOBAL_BABCO_CONNECTION_NAME)'].value | [0]" `
+            -o tsv `
+            --only-show-errors
+          if ([string]::IsNullOrWhiteSpace($bap) -or $bap -eq 'null') {
+            throw "Established global BabcoSupportConnectionString was not found on $($env:GLOBAL_BABCO_SOURCE_APP)."
+          }
+          Write-Output "::add-mask::$bap"
+          az webapp config appsettings set `
+            -g $env:AZURE_RESOURCE_GROUP `
+            -n $env:WEB_APP `
+            --settings `
+              "BAP_SUPPORT_CONNECTION_STRING=$bap" `
+              "SQL_BAP_SUPPORT_CONNECTION_STRING=$bap" `
+              "SQL_CONNECTION_STRING=$bap" `
+            --only-show-errors | Out-Null
+          Write-Host "GLOBAL_BABCO_CONNECTION=applied"
+          Write-Host "GLOBAL_BABCO_SOURCE=$($env:GLOBAL_BABCO_SOURCE_APP):$($env:GLOBAL_BABCO_CONNECTION_NAME)"
 
       - name: Deploy full source and require live SQL OpenAI Entra health
         shell: pwsh
