@@ -1,0 +1,154 @@
+name: Deploy BabcoUnloadCompare Artifact Safely
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-babcounloadcompare-from-artifact.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  TARGET_RG: 'rg-babco-rnd-sandbox'
+  TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
+  TARGET_URL: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
+  EXPECTED_SOURCE_COMMIT: 'edddda4f50a0b33d93188622fd0eef61d2141299'
+
+jobs:
+  deploy-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Azure login with existing working OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Confirm exact existing target and capture configuration names
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(az webapp show -g "$TARGET_RG" -n "$TARGET_APP" --query name -o tsv --only-show-errors)
+          test "$actual" = "$TARGET_APP"
+          az webapp start -g "$TARGET_RG" -n "$TARGET_APP" --only-show-errors >/dev/null
+          az webapp config connection-string list -g "$TARGET_RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/connections-before.txt"
+          az webapp config appsettings list -g "$TARGET_RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/appsettings-before.txt"
+          echo 'Connection string names before deployment:'
+          cat "$RUNNER_TEMP/connections-before.txt"
+          if ! grep -qx 'BabcoSupportConnectionString' "$RUNNER_TEMP/connections-before.txt"; then
+            echo 'WARNING: BabcoSupportConnectionString is not currently stored as an App Service connection string.'
+          fi
+          echo "TARGET_STATE=$(az webapp show -g "$TARGET_RG" -n "$TARGET_APP" --query state -o tsv --only-show-errors)"
+
+      - name: Download the already validated BabcoUnloadCompare build
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/build.txt' -o "$RUNNER_TEMP/build.txt"
+          cat "$RUNNER_TEMP/build.txt"
+          grep -Fq "Source commit: $EXPECTED_SOURCE_COMMIT" "$RUNNER_TEMP/build.txt"
+          curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/webapp-publish.zip' -o "$RUNNER_TEMP/webapp-publish.zip"
+          test -s "$RUNNER_TEMP/webapp-publish.zip"
+          unzip -t "$RUNNER_TEMP/webapp-publish.zip" >/dev/null
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'PROTOTYPE'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" bin/BabcoUnloadCompare.Web.dll >/dev/null
+          echo "PACKAGE_SHA256=$(sha256sum "$RUNNER_TEMP/webapp-publish.zip" | awk '{print $1}')"
+
+      - name: Deploy content only to the existing 260818 App Service
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Do not set/delete App Settings or Connection Strings here.
+          if az webapp deploy -g "$TARGET_RG" -n "$TARGET_APP" --src-path "$RUNNER_TEMP/webapp-publish.zip" --type zip --clean true --restart true --only-show-errors; then
+            echo 'DEPLOY_METHOD=az-webapp-deploy'
+          else
+            echo 'az webapp deploy failed; using the existing app publishing profile for content-only Kudu ZIP upload.'
+            profiles=$(az webapp deployment list-publishing-profiles -g "$TARGET_RG" -n "$TARGET_APP" -o json --only-show-errors)
+            user=$(printf '%s' "$profiles" | jq -r '[.[] | select(.publishMethod=="ZipDeploy" or .publishMethod=="MSDeploy")][0].userName // empty')
+            pass=$(printf '%s' "$profiles" | jq -r '[.[] | select(.publishMethod=="ZipDeploy" or .publishMethod=="MSDeploy")][0].userPWD // empty')
+            test -n "$user" && test -n "$pass"
+            echo "::add-mask::$user"
+            echo "::add-mask::$pass"
+            curl -fsS --retry 3 --retry-delay 3 -u "$user:$pass" -X PUT -H 'Content-Type: application/zip' --data-binary @"$RUNNER_TEMP/webapp-publish.zip" "https://$TARGET_APP.scm.azurewebsites.net/api/zip/site/wwwroot/" >/dev/null
+            az webapp restart -g "$TARGET_RG" -n "$TARGET_APP" --only-show-errors >/dev/null
+            echo 'DEPLOY_METHOD=kudu-content-only'
+          fi
+
+      - name: Prove existing database settings were not changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          az webapp config connection-string list -g "$TARGET_RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/connections-after.txt"
+          az webapp config appsettings list -g "$TARGET_RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/appsettings-after.txt"
+          diff -u "$RUNNER_TEMP/connections-before.txt" "$RUNNER_TEMP/connections-after.txt"
+          diff -u "$RUNNER_TEMP/appsettings-before.txt" "$RUNNER_TEMP/appsettings-after.txt"
+          echo 'AZURE_CONFIGURATION_NAMES_PRESERVED=true'
+
+      - name: Inspect existing App Service Entra configuration
+        shell: bash
+        run: |
+          set +e
+          az webapp auth show -g "$TARGET_RG" -n "$TARGET_APP" --query '{enabled:enabled,unauthenticatedClientAction:unauthenticatedClientAction,defaultProvider:defaultProvider}' -o json --only-show-errors
+          az webapp auth microsoft show -g "$TARGET_RG" -n "$TARGET_APP" --query '{enabled:enabled,clientId:registration.clientId,clientSecretSettingName:registration.clientSecretSettingName,issuer:registration.openIdIssuer}' -o json --only-show-errors
+          exit 0
+
+      - name: Verify deployed prototype file through Kudu
+        shell: bash
+        run: |
+          set -euo pipefail
+          profiles=$(az webapp deployment list-publishing-profiles -g "$TARGET_RG" -n "$TARGET_APP" -o json --only-show-errors)
+          user=$(printf '%s' "$profiles" | jq -r '[.[] | select(.publishMethod=="ZipDeploy" or .publishMethod=="MSDeploy")][0].userName // empty')
+          pass=$(printf '%s' "$profiles" | jq -r '[.[] | select(.publishMethod=="ZipDeploy" or .publishMethod=="MSDeploy")][0].userPWD // empty')
+          test -n "$user" && test -n "$pass"
+          echo "::add-mask::$user"
+          echo "::add-mask::$pass"
+          for i in $(seq 1 15); do
+            if curl -fsS -u "$user:$pass" "https://$TARGET_APP.scm.azurewebsites.net/api/vfs/site/wwwroot/Site.Master" -o "$RUNNER_TEMP/live-Site.Master"; then
+              if grep -Fq 'PROTOTYPE' "$RUNNER_TEMP/live-Site.Master"; then
+                echo 'PROTOTYPE_FILE_LIVE=true'
+                exit 0
+              fi
+            fi
+            sleep 4
+          done
+          echo 'PROTOTYPE_FILE_LIVE=false'
+          exit 1
+
+      - name: Verify live HTTP and Microsoft Entra challenge
+        shell: bash
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in $(seq 1 30); do
+            : > "$RUNNER_TEMP/site.headers"
+            code=$(curl -sS --max-time 30 --max-redirs 0 -D "$RUNNER_TEMP/site.headers" -o "$RUNNER_TEMP/site.body" -w '%{http_code}' "$TARGET_URL" || true)
+            location=$(tr -d '\r' < "$RUNNER_TEMP/site.headers" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+            echo "Site check $i/30 HTTP=$code Location=$location"
+            if [ "$code" = '302' ] && printf '%s' "$location" | grep -Fq '/.auth/login/aad'; then
+              ok=1
+              break
+            fi
+            sleep 6
+          done
+          test "$ok" = '1'
+
+          auth_url="https://$TARGET_APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx"
+          : > "$RUNNER_TEMP/entra.headers"
+          auth_code=$(curl -sS --max-time 30 --max-redirs 0 -D "$RUNNER_TEMP/entra.headers" -o "$RUNNER_TEMP/entra.body" -w '%{http_code}' "$auth_url" || true)
+          auth_location=$(tr -d '\r' < "$RUNNER_TEMP/entra.headers" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+          echo "Entra challenge HTTP=$auth_code"
+          echo "Entra location=$auth_location"
+          test "$auth_code" = '302'
+          printf '%s' "$auth_location" | grep -Eqi 'login\.microsoftonline\.com|microsoftonline\.com'
+          echo 'LIVE_APP_HTTP=true'
+          echo 'ENTRA_CHALLENGE=true'
+          echo 'VERIFIED_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
