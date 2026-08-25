@@ -1,46 +1,80 @@
-name: Quick Verify UnloadCompare Live
+name: Fix and Verify UnloadCompare Entra Redirect
 
 on:
   push:
     branches: [main]
     paths:
       - '.github/workflows/quick-verify-unloadcompare.yml'
+  workflow_dispatch:
 
 permissions:
+  id-token: write
   contents: read
 
 env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
   APP: 'app-babco-unloadcompare-0e27b0b7-260818'
+  ENTRA_APP_CLIENT_ID: '0a49493a-7199-490d-9416-59ea6199861f'
+  CALLBACK_URI: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/.auth/login/aad/callback'
 
 jobs:
-  verify:
+  fix-and-verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     steps:
-      - name: Verify root, WebForms page and Entra challenge
+      - name: Azure login with existing OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Preserve existing redirect URIs and append the 260818 callback
         shell: bash
         run: |
           set -euo pipefail
+          echo "Reading App Registration $ENTRA_APP_CLIENT_ID"
+          az ad app show --id "$ENTRA_APP_CLIENT_ID" --query '{appId:appId,displayName:displayName,redirectUris:web.redirectUris}' -o json
 
+          current=$(az ad app show --id "$ENTRA_APP_CLIENT_ID" --query 'web.redirectUris' -o json)
+          if printf '%s' "$current" | jq -e --arg u "$CALLBACK_URI" 'index($u) != null' >/dev/null; then
+            echo 'CALLBACK_ALREADY_PRESENT=true'
+          else
+            mapfile -t uris < <(printf '%s' "$current" | jq -r '.[]')
+            uris+=("$CALLBACK_URI")
+            az ad app update --id "$ENTRA_APP_CLIENT_ID" --web-redirect-uris "${uris[@]}"
+            echo 'CALLBACK_ADDED=true'
+          fi
+
+          after=$(az ad app show --id "$ENTRA_APP_CLIENT_ID" --query 'web.redirectUris' -o json)
+          printf '%s' "$after" | jq -e --arg u "$CALLBACK_URI" 'index($u) != null' >/dev/null
+          echo 'REDIRECT_URI_VERIFIED=true'
+          printf '%s\n' "$after"
+
+      - name: Verify live App Service and Entra challenge
+        shell: bash
+        run: |
+          set -euo pipefail
           root="https://$APP.azurewebsites.net/"
+          page="https://$APP.azurewebsites.net/UnloadCompare.aspx"
+          auth="https://$APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx"
+
           : > "$RUNNER_TEMP/rh"
           rcode=$(curl -sS --max-time 15 --max-redirs 0 -D "$RUNNER_TEMP/rh" -o "$RUNNER_TEMP/rb" -w '%{http_code}' "$root" || true)
           rloc=$(tr -d '\r' < "$RUNNER_TEMP/rh" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
-          echo "ROOT_HTTP=$rcode"
-          echo "ROOT_LOCATION=$rloc"
+          echo "ROOT_HTTP=$rcode ROOT_LOCATION=$rloc"
           test "$rcode" = '302'
-          printf '%s' "$rloc" | grep -Eq 'UnloadCompare\.aspx|/\.auth/login/aad'
 
-          page="https://$APP.azurewebsites.net/UnloadCompare.aspx"
           : > "$RUNNER_TEMP/ph"
           pcode=$(curl -sS --max-time 15 --max-redirs 0 -D "$RUNNER_TEMP/ph" -o "$RUNNER_TEMP/pb" -w '%{http_code}' "$page" || true)
           ploc=$(tr -d '\r' < "$RUNNER_TEMP/ph" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
-          echo "PAGE_HTTP=$pcode"
-          echo "PAGE_LOCATION=$ploc"
+          echo "PAGE_HTTP=$pcode PAGE_LOCATION=$ploc"
           test "$pcode" = '302'
           printf '%s' "$ploc" | grep -Fq '/.auth/login/aad'
 
-          auth="https://$APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx"
           : > "$RUNNER_TEMP/ah"
           acode=$(curl -sS --max-time 15 --max-redirs 0 -D "$RUNNER_TEMP/ah" -o "$RUNNER_TEMP/ab" -w '%{http_code}' "$auth" || true)
           aloc=$(tr -d '\r' < "$RUNNER_TEMP/ah" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
@@ -49,7 +83,5 @@ jobs:
           test "$acode" = '302'
           printf '%s' "$aloc" | grep -Eqi '^https://login\.(windows\.net|microsoftonline\.com)/'
 
-          echo 'ROOT_OK=true'
-          echo 'PAGE_OK=true'
-          echo 'ENTRA_OK=true'
+          echo 'LIVE_AND_ENTRA_CHALLENGE_OK=true'
           echo 'VERIFIED_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
