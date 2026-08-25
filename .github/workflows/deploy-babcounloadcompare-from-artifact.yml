@@ -18,7 +18,7 @@ env:
   TARGET_RG: 'rg-babco-rnd-sandbox'
   TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
   TARGET_URL: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
-  EXPECTED_SOURCE_COMMIT: 'edddda4f50a0b33d93188622fd0eef61d2141299'
+  EXPECTED_SOURCE_COMMIT: '35d77d595a6fb1f269a1f8901a66cea057d76735'
 
 jobs:
   deploy-and-verify:
@@ -51,7 +51,8 @@ jobs:
           curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/webapp-publish.zip' -o "$RUNNER_TEMP/webapp-publish.zip"
           unzip -t "$RUNNER_TEMP/webapp-publish.zip" >/dev/null
           for f in Default.aspx UnloadCompare.aspx Site.Master Web.config bin/BabcoUnloadCompare.Web.dll; do unzip -Z1 "$RUNNER_TEMP/webapp-publish.zip" | grep -Fxq "$f"; done
-          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'PROTOTYPE'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'font-size:24px'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'This is a prototype and not the final production website.'
           echo "PACKAGE_SHA256=$(sha256sum "$RUNNER_TEMP/webapp-publish.zip" | awk '{print $1}')"
 
       - name: Deploy through Azure ARM using OIDC
@@ -94,7 +95,7 @@ jobs:
           echo "ENTRA_HTTP=$acode"
           echo "ENTRA_LOCATION=$aloc"
           test "$acode" = '302'
-          printf '%s' "$aloc" | grep -Eqi 'login\.microsoftonline\.com|microsoftonline\.com'
+          printf '%s' "$aloc" | grep -Eqi '^https://login\.(windows\.net|microsoftonline\.com)/'
           echo 'LIVE_PAGE_OK=true'
           echo 'ENTRA_OK=true'
           echo 'VERIFIED_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
