@@ -85,3 +85,5 @@ jobs:
 
           echo 'LIVE_AND_ENTRA_CHALLENGE_OK=true'
           echo 'VERIFIED_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
+
+# retrigger after Entra admin permission was granted
