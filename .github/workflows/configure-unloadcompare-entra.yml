@@ -1,0 +1,143 @@
+name: Configure Entra For UnloadCompare 260818
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/configure-unloadcompare-entra.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+  SOURCE_APP: 'babco-sqlagent-wf-2c606af4'
+  TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
+  TARGET_PAGE: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
+
+jobs:
+  configure-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Azure login with existing working OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Capture source provider and preserve target database configuration names
+        shell: bash
+        run: |
+          set -euo pipefail
+          az webapp config connection-string list -g "$RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/connections-before.txt"
+          az webapp config appsettings list -g "$RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/settings-before.txt"
+
+          src=$(az webapp auth microsoft show -g "$RG" -n "$SOURCE_APP" -o json --only-show-errors)
+          client=$(printf '%s' "$src" | jq -r '.registration.clientId // empty')
+          secretSetting=$(printf '%s' "$src" | jq -r '.registration.clientSecretSettingName // empty')
+          issuer=$(printf '%s' "$src" | jq -r '.registration.openIdIssuer // empty')
+          audience=$(printf '%s' "$src" | jq -r '.validation.allowedAudiences[0] // empty')
+          test -n "$client" && test -n "$secretSetting" && test -n "$issuer"
+          secret=$(az webapp config appsettings list -g "$RG" -n "$SOURCE_APP" --query "[?name=='$secretSetting'].value | [0]" -o tsv --only-show-errors)
+          test -n "$secret" && test "$secret" != 'null'
+          echo "::add-mask::$secret"
+          printf '%s' "$client" > "$RUNNER_TEMP/client.txt"
+          printf '%s' "$secretSetting" > "$RUNNER_TEMP/secret-setting.txt"
+          printf '%s' "$issuer" > "$RUNNER_TEMP/issuer.txt"
+          printf '%s' "$audience" > "$RUNNER_TEMP/audience.txt"
+          printf '%s' "$secret" > "$RUNNER_TEMP/secret.txt"
+          echo "ENTRA_CLIENT_ID=$client"
+          echo "ENTRA_SECRET_SETTING=$secretSetting"
+          echo "ENTRA_ISSUER=$issuer"
+          echo "ENTRA_AUDIENCE=$audience"
+
+      - name: Configure only the Entra provider on target App Service
+        shell: bash
+        run: |
+          set -euo pipefail
+          client=$(cat "$RUNNER_TEMP/client.txt")
+          secretSetting=$(cat "$RUNNER_TEMP/secret-setting.txt")
+          issuer=$(cat "$RUNNER_TEMP/issuer.txt")
+          audience=$(cat "$RUNNER_TEMP/audience.txt")
+          secret=$(cat "$RUNNER_TEMP/secret.txt")
+          echo "::add-mask::$secret"
+
+          # Auth-specific setting only. Do not modify either DB connection string.
+          az webapp config appsettings set -g "$RG" -n "$TARGET_APP" --settings "$secretSetting=$secret" --only-show-errors >/dev/null
+
+          args=(az webapp auth microsoft update -g "$RG" -n "$TARGET_APP" --client-id "$client" --client-secret-setting-name "$secretSetting" --issuer "$issuer" --yes --only-show-errors)
+          if [ -n "$audience" ]; then args+=(--allowed-audiences "$audience"); fi
+          "${args[@]}" >/dev/null
+
+          # Keep platform anonymous so Site.Master performs the explicit /.auth/login/aad redirect.
+          az webapp auth update -g "$RG" -n "$TARGET_APP" --enabled true --unauthenticated-client-action AllowAnonymous --require-https true --enable-token-store true --only-show-errors >/dev/null
+          az webapp restart -g "$RG" -n "$TARGET_APP" --only-show-errors >/dev/null
+          echo 'ENTRA_PLATFORM_CONFIGURED=true'
+
+      - name: Prove database connection strings were not changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          az webapp config connection-string list -g "$RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/connections-after.txt"
+          diff -u "$RUNNER_TEMP/connections-before.txt" "$RUNNER_TEMP/connections-after.txt"
+          echo 'DATABASE_CONNECTION_STRING_NAMES_PRESERVED=true'
+
+      - name: Verify target Entra provider metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          client=$(cat "$RUNNER_TEMP/client.txt")
+          got=$(az webapp auth microsoft show -g "$RG" -n "$TARGET_APP" -o json --only-show-errors)
+          gotClient=$(printf '%s' "$got" | jq -r '.registration.clientId // empty')
+          gotSecretSetting=$(printf '%s' "$got" | jq -r '.registration.clientSecretSettingName // empty')
+          test "$gotClient" = "$client"
+          test -n "$gotSecretSetting"
+          platform=$(az webapp auth show -g "$RG" -n "$TARGET_APP" -o json --only-show-errors)
+          enabled=$(printf '%s' "$platform" | jq -r '.enabled // false')
+          test "$enabled" = 'true'
+          echo 'ENTRA_PROVIDER_METADATA_OK=true'
+
+      - name: Verify live app redirect and Microsoft sign-in page
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_ok=0
+          for i in $(seq 1 30); do
+            : > "$RUNNER_TEMP/app.headers"
+            code=$(curl -sS --max-time 30 --max-redirs 0 -D "$RUNNER_TEMP/app.headers" -o "$RUNNER_TEMP/app.body" -w '%{http_code}' "$TARGET_PAGE" || true)
+            location=$(tr -d '\r' < "$RUNNER_TEMP/app.headers" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+            echo "APP_CHECK_$i HTTP=$code LOCATION=$location"
+            if [ "$code" = '302' ] && printf '%s' "$location" | grep -Fq '/.auth/login/aad'; then app_ok=1; break; fi
+            sleep 6
+          done
+          test "$app_ok" = '1'
+          echo 'APP_REDIRECTS_TO_ENTRA=true'
+
+          authUrl="https://$TARGET_APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx"
+          : > "$RUNNER_TEMP/easyauth.headers"
+          authCode=$(curl -sS --max-time 30 --max-redirs 0 -D "$RUNNER_TEMP/easyauth.headers" -o "$RUNNER_TEMP/easyauth.body" -w '%{http_code}' "$authUrl" || true)
+          microsoftUrl=$(tr -d '\r' < "$RUNNER_TEMP/easyauth.headers" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+          echo "EASY_AUTH_HTTP=$authCode"
+          test "$authCode" = '302'
+          printf '%s' "$microsoftUrl" | grep -Eqi '^https://login\.microsoftonline\.com/'
+          echo 'EASY_AUTH_REDIRECTS_TO_MICROSOFT=true'
+
+          # Hit Microsoft's authorize URL without credentials. A valid redirect URI serves sign-in HTML; AADSTS50011 is a hard failure.
+          msCode=$(curl -sS -L --max-redirs 3 --max-time 45 -o "$RUNNER_TEMP/microsoft.html" -w '%{http_code}' "$microsoftUrl" || true)
+          echo "MICROSOFT_SIGNIN_HTTP=$msCode"
+          if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match' "$RUNNER_TEMP/microsoft.html"; then
+            echo 'MICROSOFT_REDIRECT_URI_VALID=false'
+            exit 1
+          fi
+          grep -Eqi 'Microsoft|Sign in|login' "$RUNNER_TEMP/microsoft.html"
+          echo 'MICROSOFT_REDIRECT_URI_VALID=true'
+          echo 'MICROSOFT_SIGNIN_PAGE_REACHED=true'
+          echo 'VERIFIED_LIVE_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
