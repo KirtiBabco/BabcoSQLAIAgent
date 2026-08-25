@@ -38,7 +38,6 @@ jobs:
         run: |
           set -euo pipefail
           az webapp config connection-string list -g "$RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/connections-before.txt"
-          az webapp config appsettings list -g "$RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/settings-before.txt"
 
           src=$(az webapp auth microsoft show -g "$RG" -n "$SOURCE_APP" -o json --only-show-errors)
           client=$(printf '%s' "$src" | jq -r '.registration.clientId // empty')
@@ -57,9 +56,8 @@ jobs:
           echo "ENTRA_CLIENT_ID=$client"
           echo "ENTRA_SECRET_SETTING=$secretSetting"
           echo "ENTRA_ISSUER=$issuer"
-          echo "ENTRA_AUDIENCE=$audience"
 
-      - name: Configure only the Entra provider on target App Service
+      - name: Configure only classic Entra auth on target App Service
         shell: bash
         run: |
           set -euo pipefail
@@ -70,17 +68,16 @@ jobs:
           secret=$(cat "$RUNNER_TEMP/secret.txt")
           echo "::add-mask::$secret"
 
-          # Auth-specific setting only. Do not modify either DB connection string.
+          # Target is on App Service Auth classic/v1. Keep that mode; only add Entra provider data.
+          # This auth-only app setting was already added safely by the first attempt; setting it again is idempotent.
           az webapp config appsettings set -g "$RG" -n "$TARGET_APP" --settings "$secretSetting=$secret" --only-show-errors >/dev/null
 
-          args=(az webapp auth microsoft update -g "$RG" -n "$TARGET_APP" --client-id "$client" --client-secret-setting-name "$secretSetting" --issuer "$issuer" --yes --only-show-errors)
-          if [ -n "$audience" ]; then args+=(--allowed-audiences "$audience"); fi
+          args=(az webapp auth-classic update -g "$RG" -n "$TARGET_APP" --enabled true --action AllowAnonymous --aad-client-id "$client" --aad-client-secret-setting-name "$secretSetting" --aad-token-issuer-url "$issuer" --token-store true --only-show-errors)
+          if [ -n "$audience" ]; then args+=(--aad-allowed-token-audiences "$audience"); fi
           "${args[@]}" >/dev/null
 
-          # Keep platform anonymous so Site.Master performs the explicit /.auth/login/aad redirect.
-          az webapp auth update -g "$RG" -n "$TARGET_APP" --enabled true --unauthenticated-client-action AllowAnonymous --require-https true --enable-token-store true --only-show-errors >/dev/null
           az webapp restart -g "$RG" -n "$TARGET_APP" --only-show-errors >/dev/null
-          echo 'ENTRA_PLATFORM_CONFIGURED=true'
+          echo 'ENTRA_CLASSIC_PLATFORM_CONFIGURED=true'
 
       - name: Prove database connection strings were not changed
         shell: bash
@@ -90,18 +87,17 @@ jobs:
           diff -u "$RUNNER_TEMP/connections-before.txt" "$RUNNER_TEMP/connections-after.txt"
           echo 'DATABASE_CONNECTION_STRING_NAMES_PRESERVED=true'
 
-      - name: Verify target Entra provider metadata
+      - name: Verify target classic Entra provider metadata
         shell: bash
         run: |
           set -euo pipefail
           client=$(cat "$RUNNER_TEMP/client.txt")
-          got=$(az webapp auth microsoft show -g "$RG" -n "$TARGET_APP" -o json --only-show-errors)
-          gotClient=$(printf '%s' "$got" | jq -r '.registration.clientId // empty')
-          gotSecretSetting=$(printf '%s' "$got" | jq -r '.registration.clientSecretSettingName // empty')
-          test "$gotClient" = "$client"
-          test -n "$gotSecretSetting"
-          platform=$(az webapp auth show -g "$RG" -n "$TARGET_APP" -o json --only-show-errors)
-          enabled=$(printf '%s' "$platform" | jq -r '.enabled // false')
+          secretSetting=$(cat "$RUNNER_TEMP/secret-setting.txt")
+          got=$(az webapp auth-classic show -g "$RG" -n "$TARGET_APP" -o json --only-show-errors)
+          printf '%s' "$got" | jq '{enabled:.enabled,action:.unauthenticatedClientAction,clientId:(.clientId // .aadClientId),secretSetting:(.clientSecretSettingName // .aadClientSecretSettingName),issuer:(.issuer // .aadTokenIssuerUrl),audiences:(.allowedAudiences // .aadAllowedTokenAudiences)}'
+          printf '%s' "$got" | grep -Fq "$client"
+          printf '%s' "$got" | grep -Fq "$secretSetting"
+          enabled=$(printf '%s' "$got" | jq -r '.enabled // false')
           test "$enabled" = 'true'
           echo 'ENTRA_PROVIDER_METADATA_OK=true'
 
@@ -130,7 +126,6 @@ jobs:
           printf '%s' "$microsoftUrl" | grep -Eqi '^https://login\.microsoftonline\.com/'
           echo 'EASY_AUTH_REDIRECTS_TO_MICROSOFT=true'
 
-          # Hit Microsoft's authorize URL without credentials. A valid redirect URI serves sign-in HTML; AADSTS50011 is a hard failure.
           msCode=$(curl -sS -L --max-redirs 3 --max-time 45 -o "$RUNNER_TEMP/microsoft.html" -w '%{http_code}' "$microsoftUrl" || true)
           echo "MICROSOFT_SIGNIN_HTTP=$msCode"
           if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match' "$RUNNER_TEMP/microsoft.html"; then
