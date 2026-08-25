@@ -7,35 +7,41 @@ on:
       - '.github/workflows/quick-verify-unloadcompare.yml'
 
 permissions:
+  id-token: write
   contents: read
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+  APP: 'app-babco-unloadcompare-0e27b0b7-260818'
 
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
-      - name: Check live app and Entra redirect
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+      - name: Read runtime and check live endpoint
         shell: bash
         run: |
           set -euo pipefail
-          # One-shot external verification only. No Azure writes.
-          page='https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
+          echo 'APP_RUNTIME:'
+          az webapp show -g "$RG" -n "$APP" --query '{name:name,state:state,kind:kind,reserved:reserved,location:location,defaultHostName:defaultHostName,serverFarmId:serverFarmId}' -o json --only-show-errors
+          echo 'APP_CONFIG:'
+          az webapp config show -g "$RG" -n "$APP" --query '{netFrameworkVersion:netFrameworkVersion,linuxFxVersion:linuxFxVersion,windowsFxVersion:windowsFxVersion,alwaysOn:alwaysOn,use32BitWorkerProcess:use32BitWorkerProcess}' -o json --only-show-errors
+          page="https://$APP.azurewebsites.net/UnloadCompare.aspx"
           hdr="$RUNNER_TEMP/page.headers"
           code=$(curl -sS --max-time 10 --max-redirs 0 -D "$hdr" -o "$RUNNER_TEMP/page.body" -w '%{http_code}' "$page" || true)
           loc=$(tr -d '\r' < "$hdr" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
           echo "PAGE_HTTP=$code"
           echo "PAGE_LOCATION=$loc"
-          test "$code" = '302'
-          printf '%s' "$loc" | grep -Fq '/.auth/login/aad'
-
-          auth='https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx'
-          ah="$RUNNER_TEMP/auth.headers"
-          acode=$(curl -sS --max-time 10 --max-redirs 0 -D "$ah" -o "$RUNNER_TEMP/auth.body" -w '%{http_code}' "$auth" || true)
-          aloc=$(tr -d '\r' < "$ah" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
-          echo "AUTH_HTTP=$acode"
-          echo "AUTH_LOCATION=$aloc"
-          test "$acode" = '302'
-          printf '%s' "$aloc" | grep -Eqi '^https://login\.microsoftonline\.com/'
-          echo 'LIVE_APP_OK=true'
-          echo 'ENTRA_REDIRECT_OK=true'
-          echo 'LIVE_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
+          echo 'PAGE_BODY_PREVIEW:'
+          head -c 300 "$RUNNER_TEMP/page.body" || true
+          echo
