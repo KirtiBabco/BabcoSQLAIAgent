@@ -18,6 +18,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # One-shot external verification only. No Azure writes.
           page='https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
           hdr="$RUNNER_TEMP/page.headers"
           code=$(curl -sS --max-time 10 --max-redirs 0 -D "$hdr" -o "$RUNNER_TEMP/page.body" -w '%{http_code}' "$page" || true)
