@@ -21,7 +21,7 @@ env:
   KVSF_IDENTITY_NAME: 'id-kvsf-github-dev'
   TARGET_RG: 'rg-babco-rnd-sandbox'
   WEB_APP: 'babco-sqlagent-wf-2c606af4'
-  CREDENTIAL_NAME: 'github-kirtibabco-babcosqlaiagent-main'
+  CREDENTIAL_NAME: 'github-kirtibabco-babcounloadcompare-main'
 
 jobs:
   bootstrap:
@@ -54,7 +54,7 @@ jobs:
               --identity-name "$KVSF_IDENTITY_NAME" \
               -n "$CREDENTIAL_NAME" \
               --issuer 'https://token.actions.githubusercontent.com' \
-              --subject 'repo:KirtiBabco/BabcoSQLAIAgent:ref:refs/heads/main' \
+              --subject 'repo:KirtiBabco/BabcoUnloadCompare:ref:refs/heads/main' \
               --audiences 'api://AzureADTokenExchange' \
               --only-show-errors >/dev/null 2>"$err"
             rc=$?
