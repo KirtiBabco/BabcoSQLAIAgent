@@ -1,0 +1,60 @@
+name: Inspect Entra Source For UnloadCompare
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/inspect-unloadcompare-entra-source.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+  SOURCE_APP: 'babco-sqlagent-wf-2c606af4'
+  TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+      - name: Inspect safe Entra metadata only
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'SOURCE_PLATFORM:'
+          az webapp auth show -g "$RG" -n "$SOURCE_APP" --query '{enabled:enabled,action:unauthenticatedClientAction,defaultProvider:defaultProvider}' -o json --only-show-errors
+          echo 'SOURCE_MICROSOFT:'
+          src=$(az webapp auth microsoft show -g "$RG" -n "$SOURCE_APP" -o json --only-show-errors)
+          printf '%s' "$src" | jq '{clientId:(.registration.clientId // .clientId),secretSetting:(.registration.clientSecretSettingName // .clientSecretSettingName),issuer:(.registration.openIdIssuer // .openIdIssuer),allowedAudiences:(.validation.allowedAudiences // .allowedAudiences)}'
+          client=$(printf '%s' "$src" | jq -r '.registration.clientId // .clientId // empty')
+          secretSetting=$(printf '%s' "$src" | jq -r '.registration.clientSecretSettingName // .clientSecretSettingName // empty')
+          echo "CLIENT_ID=$client"
+          echo "SECRET_SETTING_NAME=$secretSetting"
+          if [ -n "$client" ]; then
+            echo 'AAD_APP_REDIRECT_URIS:'
+            az ad app show --id "$client" --query 'web.redirectUris' -o json --only-show-errors || true
+            echo 'AAD_APP_OBJECT_ID:'
+            az ad app show --id "$client" --query 'id' -o tsv --only-show-errors || true
+          fi
+          if [ -n "$secretSetting" ]; then
+            secret=$(az webapp config appsettings list -g "$RG" -n "$SOURCE_APP" --query "[?name=='$secretSetting'].value | [0]" -o tsv --only-show-errors)
+            if [ -n "$secret" ] && [ "$secret" != 'null' ]; then
+              echo 'SOURCE_AUTH_SECRET_PRESENT=true'
+            else
+              echo 'SOURCE_AUTH_SECRET_PRESENT=false'
+            fi
+          fi
+          echo 'TARGET_PLATFORM_BEFORE:'
+          az webapp auth show -g "$RG" -n "$TARGET_APP" --query '{enabled:enabled,action:unauthenticatedClientAction,defaultProvider:defaultProvider}' -o json --only-show-errors
