@@ -1,0 +1,109 @@
+name: Repair UnloadCompare wwwroot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-unloadcompare-wwwroot.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+  APP: 'app-babco-unloadcompare-0e27b0b7-260818'
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Preserve config and download build
+        shell: bash
+        run: |
+          set -euo pipefail
+          az webapp config connection-string list -g "$RG" -n "$APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/cs-before"
+          az webapp config appsettings list -g "$RG" -n "$APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/as-before"
+          curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/webapp-publish.zip' -o "$RUNNER_TEMP/app.zip"
+          unzip -t "$RUNNER_TEMP/app.zip" >/dev/null
+          for f in Default.aspx UnloadCompare.aspx Site.Master Web.config bin/BabcoUnloadCompare.Web.dll; do
+            unzip -Z1 "$RUNNER_TEMP/app.zip" | grep -Fxq "$f"
+          done
+          unzip -p "$RUNNER_TEMP/app.zip" Site.Master | grep -Fq 'PROTOTYPE'
+
+      - name: Overlay exact artifact to wwwroot
+        shell: bash
+        run: |
+          set -euo pipefail
+          profiles=$(az webapp deployment list-publishing-profiles -g "$RG" -n "$APP" -o json --only-show-errors)
+          user=$(printf '%s' "$profiles" | jq -r '[.[] | select(.publishMethod=="ZipDeploy" or .publishMethod=="MSDeploy")][0].userName // empty')
+          pass=$(printf '%s' "$profiles" | jq -r '[.[] | select(.publishMethod=="ZipDeploy" or .publishMethod=="MSDeploy")][0].userPWD // empty')
+          test -n "$user" && test -n "$pass"
+          echo "::add-mask::$user"
+          echo "::add-mask::$pass"
+          printf '%s' "$user" > "$RUNNER_TEMP/u"
+          printf '%s' "$pass" > "$RUNNER_TEMP/p"
+          echo 'WWWROOT_BEFORE:'
+          curl -fsS -u "$user:$pass" "https://$APP.scm.azurewebsites.net/api/vfs/site/wwwroot/" | jq -r '.[].name' | sort || true
+          curl -fsS --retry 3 --retry-delay 3 -u "$user:$pass" -X PUT -H 'Content-Type: application/zip' --data-binary @"$RUNNER_TEMP/app.zip" "https://$APP.scm.azurewebsites.net/api/zip/site/wwwroot/" >/dev/null
+          az webapp restart -g "$RG" -n "$APP" --only-show-errors >/dev/null
+          sleep 8
+
+      - name: Verify physical files and preserved settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          user=$(cat "$RUNNER_TEMP/u"); pass=$(cat "$RUNNER_TEMP/p")
+          echo "::add-mask::$user"; echo "::add-mask::$pass"
+          for f in Default.aspx UnloadCompare.aspx Site.Master Web.config bin/BabcoUnloadCompare.Web.dll; do
+            code=$(curl -sS -u "$user:$pass" -o "$RUNNER_TEMP/check" -w '%{http_code}' "https://$APP.scm.azurewebsites.net/api/vfs/site/wwwroot/$f")
+            echo "KUDU_FILE $f HTTP=$code"
+            test "$code" = '200'
+            test -s "$RUNNER_TEMP/check"
+          done
+          curl -fsS -u "$user:$pass" "https://$APP.scm.azurewebsites.net/api/vfs/site/wwwroot/Site.Master" | grep -Fq 'PROTOTYPE'
+          az webapp config connection-string list -g "$RG" -n "$APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/cs-after"
+          az webapp config appsettings list -g "$RG" -n "$APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/as-after"
+          diff -u "$RUNNER_TEMP/cs-before" "$RUNNER_TEMP/cs-after"
+          diff -u "$RUNNER_TEMP/as-before" "$RUNNER_TEMP/as-after"
+          echo 'WWWROOT_OK=true'
+          echo 'CONFIG_PRESERVED=true'
+
+      - name: Verify live page and Entra
+        shell: bash
+        run: |
+          set -euo pipefail
+          page="https://$APP.azurewebsites.net/UnloadCompare.aspx"
+          ok=0
+          for i in $(seq 1 24); do
+            : > "$RUNNER_TEMP/h"
+            code=$(curl -sS --max-time 20 --max-redirs 0 -D "$RUNNER_TEMP/h" -o "$RUNNER_TEMP/b" -w '%{http_code}' "$page" || true)
+            loc=$(tr -d '\r' < "$RUNNER_TEMP/h" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+            echo "LIVE_$i HTTP=$code LOCATION=$loc"
+            if [ "$code" = '302' ] && printf '%s' "$loc" | grep -Fq '/.auth/login/aad'; then ok=1; break; fi
+            sleep 5
+          done
+          test "$ok" = '1'
+          auth="https://$APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx"
+          : > "$RUNNER_TEMP/ah"
+          acode=$(curl -sS --max-time 20 --max-redirs 0 -D "$RUNNER_TEMP/ah" -o "$RUNNER_TEMP/ab" -w '%{http_code}' "$auth" || true)
+          aloc=$(tr -d '\r' < "$RUNNER_TEMP/ah" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+          echo "ENTRA_HTTP=$acode"
+          echo "ENTRA_LOCATION=$aloc"
+          test "$acode" = '302'
+          printf '%s' "$aloc" | grep -Eqi 'login\.microsoftonline\.com|microsoftonline\.com'
+          echo 'LIVE_PAGE_OK=true'
+          echo 'ENTRA_OK=true'
+          echo 'VERIFIED_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
