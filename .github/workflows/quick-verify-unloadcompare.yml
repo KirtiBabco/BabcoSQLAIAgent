@@ -1,0 +1,40 @@
+name: Quick Verify UnloadCompare Live
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/quick-verify-unloadcompare.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check live app and Entra redirect
+        shell: bash
+        run: |
+          set -euo pipefail
+          page='https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
+          hdr="$RUNNER_TEMP/page.headers"
+          code=$(curl -sS --max-time 10 --max-redirs 0 -D "$hdr" -o "$RUNNER_TEMP/page.body" -w '%{http_code}' "$page" || true)
+          loc=$(tr -d '\r' < "$hdr" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+          echo "PAGE_HTTP=$code"
+          echo "PAGE_LOCATION=$loc"
+          test "$code" = '302'
+          printf '%s' "$loc" | grep -Fq '/.auth/login/aad'
+
+          auth='https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx'
+          ah="$RUNNER_TEMP/auth.headers"
+          acode=$(curl -sS --max-time 10 --max-redirs 0 -D "$ah" -o "$RUNNER_TEMP/auth.body" -w '%{http_code}' "$auth" || true)
+          aloc=$(tr -d '\r' < "$ah" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+          echo "AUTH_HTTP=$acode"
+          echo "AUTH_LOCATION=$aloc"
+          test "$acode" = '302'
+          printf '%s' "$aloc" | grep -Eqi '^https://login\.microsoftonline\.com/'
+          echo 'LIVE_APP_OK=true'
+          echo 'ENTRA_REDIRECT_OK=true'
+          echo 'LIVE_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
