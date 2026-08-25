@@ -1,0 +1,16 @@
+SOURCE_COMMIT=9cdc92575d5388211ea681ff4b98a1cf699e9315
+CURRENT_OIDC_LOGIN=success
+KVSF_FEDERATED_CREDENTIAL=failed
+KVSF_FEDERATED_CREDENTIAL_ERROR=ERROR: (AuthorizationFailed) The client '7a21e1b8-ee78-429e-8051-5dce354e3e1d' with object id '4de45d2e-89b7-4636-868d-8aa246b2112a' does not have authorization to perform action 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/write' over scope '/subscriptions/0e27b0b7-22b9-4e96-8faa-897ca9f09e9c/resourceGroups/rg-kv-software-factory-dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-kvsf-github-dev/federatedIdentityCredentials/github-kirtibabco-babcounloadcompare-main' or the scope is invalid. If access was recently granted, please refresh your credentials. Code: AuthorizationFailed Message: The client '7a21e1b8-ee78-429e-8051-5dce354e3e1d' with
+TARGET_RG_CONTRIBUTOR=failed
+TARGET_RG_CONTRIBUTOR_ERROR=ERROR: (AuthorizationFailed) The client '7a21e1b8-ee78-429e-8051-5dce354e3e1d' with object id '4de45d2e-89b7-4636-868d-8aa246b2112a' does not have authorization to perform action 'Microsoft.Authorization/roleAssignments/write' over scope '/subscriptions/0e27b0b7-22b9-4e96-8faa-897ca9f09e9c/resourceGroups/rg-babco-rnd-sandbox/providers/Microsoft.Authorization/roleAssignments/7493f7ff-6c36-416a-b2b2-ecc73e99f2a1' or the scope is invalid. If access was recently granted, please refresh your credentials. Code: AuthorizationFailed Message: The client '7a21e1b8-ee78-429e-8051-5dce354e3e1d' with object id '4de45d2e-89b7-4636-868d-8aa246b2112a' does not have authorization to perform action 'Microsoft
+AZURE_SQL_SERVERS=rg-babco-rnd-sandbox	sql-babco-recallready-rnd-2608145cf12740	sql-babco-recallready-rnd-2608145cf12740.database.windows.net	Enabled|rg-babco-rnd-sandbox	sql-babco-supplierconnect-suhana-rnd-20260811	sql-babco-supplierconnect-suhana-rnd-20260811.database.windows.net	Enabled|rg-babco-rnd-sandbox	sql-babco-traceguard-rnd-pcidrwpd-ci	sql-babco-traceguard-rnd-pcidrwpd-ci.database.windows.net	Enabled|rg-babco-rnd-sandbox	sql-babco-unloadcompare-0e27b0b7-260814	sql-babco-unloadcompare-0e27b0b7-260814.database.windows.net	Enabled|rg-babco-rnd-sandbox	sql-babco-unloadcompare-0e27b0b7-260818	sql-babco-unloadcompare-0e27b0b7-260818.database.windows.net	Enabled|rg-babco-rnd-sandbox	sql-resolvedesk-kirti20260807	sql-resolvedesk-kirti20260807.database.windows.net	Enabled|rg-babco-rnd-sandbox	sql-resolvedesk-kirti20260810	sql-resolvedesk-kirti20260810.database.windows.net	Enabled|
+AZURE_SQL_DATABASES=
+VNETS=
+VNET_GATEWAYS=
+LOCAL_NETWORK_GATEWAYS=
+APP_VNET_INTEGRATION=
+APP_HYBRID_CONNECTIONS=
+APP_OUTBOUND_IPS=4.186.37.225,4.186.35.45,4.186.37.255,4.186.38.8,4.186.34.74,4.186.38.147,4.186.39.1,4.186.39.5,4.186.39.7,4.186.39.8,4.186.39.17,4.186.39.19,4.186.39.28,4.186.39.49,4.186.39.52,4.186.39.61,4.186.39.68,4.186.39.71,4.188.108.182,4.186.37.226,4.186.38.157,4.186.38.168,4.186.38.170,4.186.38.176,4.186.38.182,4.186.38.188,4.186.32.153,4.186.37.249,4.186.38.196,4.186.38.202,4.186.35.8,4.186.38.213,4.186.38.228,4.186.38.243,4.186.38.248,4.186.33.91,4.186.38.253,4.186.39.90,4.186.39.119,4.186.39.134,4.186.39.136,4.186.39.148,4.186.39.155,20.192.171.1,20.192.170.135
+BOOTSTRAP=failure
+CHECKED_UTC=2026-08-25T16:04:24Z
