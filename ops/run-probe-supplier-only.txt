@@ -1,0 +1,1 @@
+Probe client 636abdef-bcb6-407d-9334-c89079f29da8 against the SQL Agent Easy Auth callback on a Windows runner.
