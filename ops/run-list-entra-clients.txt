@@ -1,0 +1,1 @@
+List existing App Service Entra client IDs and source apps in rg-babco-rnd-sandbox without exposing secrets.
