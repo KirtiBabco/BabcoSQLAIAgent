@@ -1,1 +1,2 @@
 Run multi-path repair for https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback using existing deployment identity and Easy Auth app credential; preserve existing redirect URIs and verify Microsoft sign-in no longer returns AADSTS50011.
+Retry requested from live AADSTS50011 screenshot on 2026-08-27.
