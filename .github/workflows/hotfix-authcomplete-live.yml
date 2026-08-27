@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/hotfix-authcomplete-live.yml'
+      - 'AuthComplete.aspx'
       - 'ops/run-authcomplete-hotfix.txt'
   workflow_dispatch:
 
@@ -70,10 +71,11 @@ jobs:
           loc=$(tr -d '\r' < "$RUNNER_TEMP/auth.headers" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
           if printf '%s' "$loc" | grep -Eqi '^https://login\.microsoftonline\.com/'; then echo 'ENTRA_CHALLENGE=true' >> "$status"; else echo 'ENTRA_CHALLENGE=false' >> "$status"; fi
 
-          callbackCode=$(curl -k -sS -o "$RUNNER_TEMP/callback.html" -w '%{http_code}' --max-time 20 "https://${APP}.azurewebsites.net/AuthComplete.aspx" || true)
+          callbackCode=$(curl -k -sS -o "$RUNNER_TEMP/callback.html" -w '%{http_code}' --max-time 20 --max-redirs 0 "https://${APP}.azurewebsites.net/AuthComplete.aspx" || true)
           echo "AUTHCOMPLETE_HTTP=$callbackCode" >> "$status"
           if grep -Fq "Could not load type 'SQL_AI_Agent.AuthComplete'" "$RUNNER_TEMP/callback.html"; then echo 'AUTHCOMPLETE_TYPE_ERROR=true' >> "$status"; else echo 'AUTHCOMPLETE_TYPE_ERROR=false' >> "$status"; fi
-          if [ "$loginCode" = '200' ] && grep -q '^ENTRA_CHALLENGE=true$' "$status" && grep -q '^AUTHCOMPLETE_TYPE_ERROR=false$' "$status"; then echo 'VERIFY=success' >> "$status"; else echo 'VERIFY=failure' >> "$status"; fi
+          if [ "$callbackCode" = '500' ] || grep -Eqi 'Parser Error|Compilation Error|Server Error in .Application' "$RUNNER_TEMP/callback.html"; then echo 'AUTHCOMPLETE_RUNTIME_ERROR=true' >> "$status"; else echo 'AUTHCOMPLETE_RUNTIME_ERROR=false' >> "$status"; fi
+          if [ "$loginCode" = '200' ] && grep -q '^ENTRA_CHALLENGE=true$' "$status" && grep -q '^AUTHCOMPLETE_TYPE_ERROR=false$' "$status" && grep -q '^AUTHCOMPLETE_RUNTIME_ERROR=false$' "$status"; then echo 'VERIFY=success' >> "$status"; else echo 'VERIFY=failure' >> "$status"; fi
           echo "LIVE_URL=$login" >> "$status"
           echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$status"
 
