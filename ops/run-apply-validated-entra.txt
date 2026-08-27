@@ -1,0 +1,1 @@
+Apply prevalidated Entra client 636abdef-bcb6-407d-9334-c89079f29da8 to babco-sqlagent-wf-2c606af4 using the existing source secret, then verify Login 200 and AADSTS50011 absent.
