@@ -1,0 +1,100 @@
+name: Create Dedicated SQL Agent Entra App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/create-sqlagent-entra-app.yml'
+      - 'ops/run-create-sqlagent-entra.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+  TARGET_APP: 'babco-sqlagent-wf-2c606af4'
+  CALLBACK_URI: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
+  SECRET_SETTING: 'SQLAGENT_ENTRA_DEDICATED_SECRET'
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Create dedicated app registration and configure Easy Auth
+        shell: bash
+        run: |
+          set +e
+          s="$RUNNER_TEMP/status.txt"
+          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$s"
+          name="Babco SQL AI Agent - ${TARGET_APP}"
+          appJson=$(az ad app create --display-name "$name" --web-redirect-uris "$CALLBACK_URI" --sign-in-audience AzureADMyOrg -o json 2>"$RUNNER_TEMP/create.err")
+          if [ $? -ne 0 ] || [ -z "$appJson" ]; then
+            echo 'APP_CREATE=false' >> "$s"
+            err=$(tr '\n' ' ' < "$RUNNER_TEMP/create.err" | sed 's/[[:space:]]\+/ /g' | cut -c1-1000)
+            echo "APP_CREATE_ERROR=$err" >> "$s"
+            exit 1
+          fi
+          client=$(printf '%s' "$appJson" | jq -r '.appId // empty')
+          objectId=$(printf '%s' "$appJson" | jq -r '.id // empty')
+          echo "DEDICATED_CLIENT_ID=$client" >> "$s"
+          echo 'APP_CREATE=true' >> "$s"
+          cred=$(az ad app credential reset --id "$objectId" --append --display-name 'SQL Agent Easy Auth' --years 1 -o json 2>"$RUNNER_TEMP/cred.err")
+          if [ $? -ne 0 ]; then
+            echo 'SECRET_CREATE=false' >> "$s"
+            exit 1
+          fi
+          secret=$(printf '%s' "$cred" | jq -r '.password // empty')
+          test -n "$secret" || exit 1
+          echo "::add-mask::$secret"
+          echo 'SECRET_CREATE=true' >> "$s"
+          az webapp config appsettings set -g "$RG" -n "$TARGET_APP" --settings "$SECRET_SETTING=$secret" --only-show-errors >/dev/null
+          issuer="https://login.microsoftonline.com/${AZURE_TENANT_ID}/v2.0"
+          az webapp auth microsoft update -g "$RG" -n "$TARGET_APP" --client-id "$client" --client-secret-setting-name "$SECRET_SETTING" --issuer "$issuer" --yes --only-show-errors >"$RUNNER_TEMP/auth.out" 2>"$RUNNER_TEMP/auth.err"
+          if [ $? -ne 0 ]; then
+            echo 'AUTH_UPDATE=false' >> "$s"
+            err=$(tr '\n' ' ' < "$RUNNER_TEMP/auth.err" | sed 's/[[:space:]]\+/ /g' | cut -c1-1000)
+            echo "AUTH_UPDATE_ERROR=$err" >> "$s"
+            exit 1
+          fi
+          echo 'AUTH_UPDATE=true' >> "$s"
+          az webapp restart -g "$RG" -n "$TARGET_APP" --only-show-errors >/dev/null
+          sleep 12
+          authUrl="https://${TARGET_APP}.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx"
+          curl -sS --max-time 25 --max-redirs 0 -D "$RUNNER_TEMP/h" -o /dev/null "$authUrl" || true
+          murl=$(tr -d '\r' < "$RUNNER_TEMP/h" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+          if ! printf '%s' "$murl" | grep -Eqi '^https://login\.microsoftonline\.com/'; then echo 'EASY_AUTH_CHALLENGE=false' >> "$s"; exit 1; fi
+          echo 'EASY_AUTH_CHALLENGE=true' >> "$s"
+          curl -sS --max-time 30 -o "$RUNNER_TEMP/ms.html" "$murl" || true
+          if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match' "$RUNNER_TEMP/ms.html"; then echo 'AADSTS50011_PRESENT=true' >> "$s"; echo 'VERIFY=failure' >> "$s"; exit 1; fi
+          echo 'AADSTS50011_PRESENT=false' >> "$s"
+          echo 'VERIFY=success' >> "$s"
+          echo "LIVE_URL=https://${TARGET_APP}.azurewebsites.net/Login.aspx" >> "$s"
+
+      - name: Publish
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/pub"; mkdir -p "$d"
+          cp "$RUNNER_TEMP/status.txt" "$d/status.txt" 2>/dev/null || echo 'RUN_FAILED=true' > "$d/status.txt"
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$d/status.txt"
+          cd "$d"; git init -q; git checkout -q -b entra-dedicated-status
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt; git commit -q -m 'Publish dedicated Entra recovery status'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin entra-dedicated-status >/dev/null
