@@ -1,0 +1,1 @@
+Probe existing App Service Entra clients for the SQL Agent callback, apply only a validated client, and verify AADSTS50011 is gone.
