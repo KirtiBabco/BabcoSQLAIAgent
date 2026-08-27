@@ -1,0 +1,67 @@
+name: List Entra Clients Fast
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/list-entra-clients-fast.yml'
+      - 'ops/run-list-entra-clients-fast.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+      - name: Inventory bounded Entra metadata
+        shell: bash
+        run: |
+          set +e
+          out="$RUNNER_TEMP/status.txt"
+          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$out"
+          apps=$(az webapp list -g "$RG" --query '[].name' -o tsv --only-show-errors)
+          while read -r app; do
+            [ -z "$app" ] && continue
+            auth=$(timeout 8s az webapp auth microsoft show -g "$RG" -n "$app" -o json --only-show-errors 2>/dev/null)
+            client=$(printf '%s' "$auth" | jq -r '.registration.clientId // empty' 2>/dev/null)
+            setting=$(printf '%s' "$auth" | jq -r '.registration.clientSecretSettingName // empty' 2>/dev/null)
+            if [ -n "$client" ]; then
+              secretPresent=false
+              if [ -n "$setting" ]; then
+                v=$(timeout 8s az webapp config appsettings list -g "$RG" -n "$app" --query "[?name=='$setting'].value | [0]" -o tsv --only-show-errors 2>/dev/null)
+                [ -n "$v" ] && [ "$v" != 'null' ] && secretPresent=true
+              fi
+              echo "APP=$app|CLIENT=$client|SECRET_SETTING=$setting|SECRET_PRESENT=$secretPresent" >> "$out"
+            fi
+          done <<< "$apps"
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$out"
+      - name: Publish
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/pub"; mkdir -p "$d"
+          cp "$RUNNER_TEMP/status.txt" "$d/status.txt" 2>/dev/null || echo 'RUN_FAILED=true' > "$d/status.txt"
+          cd "$d"; git init -q; git checkout -q -b entra-client-inventory-status
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt; git commit -q -m 'Publish Entra client inventory'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin entra-client-inventory-status >/dev/null
