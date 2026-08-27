@@ -1,0 +1,1 @@
+Add and verify https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback on app registration 0a49493a-7199-490d-9416-59ea6199861f while preserving existing redirect URIs.
