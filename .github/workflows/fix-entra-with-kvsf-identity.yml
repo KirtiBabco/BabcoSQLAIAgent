@@ -1,0 +1,89 @@
+name: Fix Entra With Existing KVSF Identity
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-entra-with-kvsf-identity.yml'
+      - 'ops/run-fix-entra-kvsf.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  KVSF_CLIENT_ID: '651fe941-d9ea-48b4-a339-bf119bc8e9e9'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  ENTRA_APP_CLIENT_ID: '0a49493a-7199-490d-9416-59ea6199861f'
+  CALLBACK_URI: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Login with existing KVSF identity
+        id: login
+        continue-on-error: true
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.KVSF_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Attempt redirect URI repair
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          status="$RUNNER_TEMP/kvsf-status.txt"
+          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$status"
+          if [ '${{ steps.login.outcome }}' != 'success' ]; then
+            echo 'KVSF_OIDC_LOGIN=false' >> "$status"
+            echo 'UPDATE=false' >> "$status"
+            exit 0
+          fi
+          echo 'KVSF_OIDC_LOGIN=true' >> "$status"
+          current=$(az ad app show --id "$ENTRA_APP_CLIENT_ID" --query 'web.redirectUris' -o json 2>"$RUNNER_TEMP/read.err")
+          if [ $? -ne 0 ] || [ -z "$current" ]; then
+            echo 'GRAPH_READ=false' >> "$status"
+            echo "ERROR=$(tr '\n' ' ' < "$RUNNER_TEMP/read.err" | sed 's/[[:space:]]\+/ /g' | cut -c1-500)" >> "$status"
+            echo 'UPDATE=false' >> "$status"
+            exit 0
+          fi
+          echo 'GRAPH_READ=true' >> "$status"
+          if printf '%s' "$current" | jq -e --arg u "$CALLBACK_URI" 'index($u) != null' >/dev/null; then
+            echo 'REDIRECT_ALREADY_PRESENT=true' >> "$status"
+            echo 'UPDATE=true' >> "$status"
+            exit 0
+          fi
+          mapfile -t uris < <(printf '%s' "$current" | jq -r '.[]')
+          uris+=("$CALLBACK_URI")
+          az ad app update --id "$ENTRA_APP_CLIENT_ID" --web-redirect-uris "${uris[@]}" 2>"$RUNNER_TEMP/write.err"
+          if [ $? -eq 0 ]; then
+            echo 'GRAPH_WRITE=true' >> "$status"
+            echo 'UPDATE=true' >> "$status"
+          else
+            echo 'GRAPH_WRITE=false' >> "$status"
+            echo "ERROR=$(tr '\n' ' ' < "$RUNNER_TEMP/write.err" | sed 's/[[:space:]]\+/ /g' | cut -c1-500)" >> "$status"
+            echo 'UPDATE=false' >> "$status"
+          fi
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$status"
+
+      - name: Publish
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/pub"; mkdir -p "$d"
+          cp "$RUNNER_TEMP/kvsf-status.txt" "$d/status.txt" 2>/dev/null || echo 'RUN_FAILED=true' > "$d/status.txt"
+          cd "$d"; git init -q; git checkout -q -b entra-kvsf-status
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt; git commit -q -m 'Publish KVSF Entra repair status'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin entra-kvsf-status >/dev/null
