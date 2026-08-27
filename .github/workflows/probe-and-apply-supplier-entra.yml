@@ -1,0 +1,121 @@
+name: Probe And Apply Existing Entra Client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/probe-and-apply-supplier-entra.yml'
+      - 'ops/run-probe-supplier-entra.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+  TARGET_APP: 'babco-sqlagent-wf-2c606af4'
+  SOURCE_APP: 'app-babco-supplierconnect-suhana-rnd'
+  CANDIDATE_CLIENT_ID: '636abdef-bcb6-407d-9334-c89079f29da8'
+  SOURCE_SECRET_SETTING: 'AUTH_CLIENT_SECRET'
+  TARGET_SECRET_SETTING: 'SQLAGENT_ENTRA_RECOVERY_SECRET'
+  CALLBACK_URI: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Probe candidate callback registration
+        shell: bash
+        run: |
+          set -euo pipefail
+          s="$RUNNER_TEMP/status.txt"
+          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$s"
+          enc=$(python3 -c 'import urllib.parse,os; print(urllib.parse.quote(os.environ["CALLBACK_URI"],safe=""))')
+          url="https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/authorize?client_id=${CANDIDATE_CLIENT_ID}&response_type=code&redirect_uri=${enc}&response_mode=query&scope=openid%20profile%20email&state=probe123&nonce=probe123&prompt=login"
+          code=$(curl -sS --max-time 30 -o "$RUNNER_TEMP/probe.html" -w '%{http_code}' "$url" || true)
+          echo "PROBE_HTTP=$code" >> "$s"
+          if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match|redirect_uri.*does not match' "$RUNNER_TEMP/probe.html"; then
+            echo 'CANDIDATE_ACCEPTS_CALLBACK=false' >> "$s"
+            exit 1
+          fi
+          if grep -Eqi 'AADSTS[0-9]+' "$RUNNER_TEMP/probe.html"; then
+            err=$(grep -Eo 'AADSTS[0-9]+' "$RUNNER_TEMP/probe.html" | head -1 || true)
+            echo "CANDIDATE_OTHER_AAD_ERROR=$err" >> "$s"
+            exit 1
+          fi
+          echo 'CANDIDATE_ACCEPTS_CALLBACK=true' >> "$s"
+
+      - name: Apply validated Microsoft provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          s="$RUNNER_TEMP/status.txt"
+          secret=$(az webapp config appsettings list -g "$RG" -n "$SOURCE_APP" --query "[?name=='$SOURCE_SECRET_SETTING'].value | [0]" -o tsv --only-show-errors)
+          test -n "$secret" && test "$secret" != 'null'
+          echo "::add-mask::$secret"
+          src=$(az webapp auth microsoft show -g "$RG" -n "$SOURCE_APP" -o json --only-show-errors)
+          issuer=$(printf '%s' "$src" | jq -r '.registration.openIdIssuer // empty')
+          az webapp config appsettings set -g "$RG" -n "$TARGET_APP" --settings "$TARGET_SECRET_SETTING=$secret" --only-show-errors >/dev/null
+          args=(az webapp auth microsoft update -g "$RG" -n "$TARGET_APP" --client-id "$CANDIDATE_CLIENT_ID" --client-secret-setting-name "$TARGET_SECRET_SETTING" --yes --only-show-errors)
+          [ -n "$issuer" ] && args+=(--issuer "$issuer")
+          if ! "${args[@]}" >"$RUNNER_TEMP/update.out" 2>"$RUNNER_TEMP/update.err"; then
+            echo 'AUTH_UPDATE=false' >> "$s"
+            err=$(tr '\n' ' ' < "$RUNNER_TEMP/update.err" | sed 's/[[:space:]]\+/ /g' | cut -c1-800)
+            echo "AUTH_UPDATE_ERROR=$err" >> "$s"
+            exit 1
+          fi
+          echo 'AUTH_UPDATE=true' >> "$s"
+          az webapp restart -g "$RG" -n "$TARGET_APP" --only-show-errors >/dev/null
+
+      - name: Verify live Microsoft challenge
+        shell: bash
+        run: |
+          set -euo pipefail
+          s="$RUNNER_TEMP/status.txt"
+          sleep 12
+          authUrl="https://${TARGET_APP}.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx"
+          curl -sS --max-time 25 --max-redirs 0 -D "$RUNNER_TEMP/h" -o /dev/null "$authUrl" || true
+          murl=$(tr -d '\r' < "$RUNNER_TEMP/h" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+          if ! printf '%s' "$murl" | grep -Eqi '^https://login\.microsoftonline\.com/'; then
+            echo 'EASY_AUTH_CHALLENGE=false' >> "$s"
+            exit 1
+          fi
+          echo 'EASY_AUTH_CHALLENGE=true' >> "$s"
+          code=$(curl -sS --max-time 30 -o "$RUNNER_TEMP/final.html" -w '%{http_code}' "$murl" || true)
+          echo "MICROSOFT_HTTP=$code" >> "$s"
+          if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match|redirect_uri.*does not match' "$RUNNER_TEMP/final.html"; then
+            echo 'AADSTS50011_PRESENT=true' >> "$s"
+            echo 'VERIFY=failure' >> "$s"
+            exit 1
+          fi
+          echo 'AADSTS50011_PRESENT=false' >> "$s"
+          echo 'VERIFY=success' >> "$s"
+          echo "LIVE_URL=https://${TARGET_APP}.azurewebsites.net/Login.aspx" >> "$s"
+
+      - name: Publish status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/pub"; mkdir -p "$d"
+          cp "$RUNNER_TEMP/status.txt" "$d/status.txt" 2>/dev/null || echo 'RUN_FAILED=true' > "$d/status.txt"
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$d/status.txt"
+          cd "$d"; git init -q; git checkout -q -b entra-targeted-status
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt; git commit -q -m 'Publish targeted Entra repair status'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin entra-targeted-status >/dev/null
