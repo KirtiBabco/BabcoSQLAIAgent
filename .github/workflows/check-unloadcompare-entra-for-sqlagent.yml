@@ -1,0 +1,70 @@
+name: Check UnloadCompare Entra For SQL Agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/check-unloadcompare-entra-for-sqlagent.yml'
+      - 'ops/run-check-unloadcompare-entra.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+  SOURCE_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
+  CALLBACK: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Check working source registration against target callback
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$RUNNER_TEMP/status.txt"
+          auth=$(az webapp auth microsoft show -g "$RG" -n "$SOURCE_APP" -o json --only-show-errors)
+          client=$(printf '%s' "$auth" | jq -r '.registration.clientId // .clientId // empty')
+          test -n "$client"
+          encoded=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CALLBACK")
+          url="https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/authorize?client_id=$client&response_type=code&redirect_uri=$encoded&response_mode=query&scope=openid&state=check&nonce=check"
+          curl -sS -L --max-redirs 5 --max-time 45 -o "$RUNNER_TEMP/ms.html" "$url" || true
+          echo "SOURCE_CLIENT_ID=$client" > "$status"
+          if grep -Eqi 'AADSTS50011|redirect URI.*does not match|reply URL.*does not match' "$RUNNER_TEMP/ms.html"; then
+            echo 'SOURCE_ACCEPTS_SQLAGENT_CALLBACK=false' >> "$status"
+          else
+            echo 'SOURCE_ACCEPTS_SQLAGENT_CALLBACK=true' >> "$status"
+          fi
+
+      - name: Publish status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/pub"; mkdir -p "$d"
+          cp "$RUNNER_TEMP/status.txt" "$d/status.txt" 2>/dev/null || echo 'RUN_FAILED=true' > "$d/status.txt"
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$d/status.txt"
+          cd "$d"
+          git init -q
+          git checkout -q -b check-unloadcompare-entra-status
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt
+          git commit -q -m 'Publish UnloadCompare Entra check'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin check-unloadcompare-entra-status >/dev/null
