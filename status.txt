@@ -1,0 +1,6 @@
+SOURCE_COMMIT=740a084344ece84d9dde4a3ea78686faabc66347
+CALLBACK_URI=https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback
+VALID_CLIENT_FOUND=true
+VALID_CLIENT_SOURCE_APP=babco-sqlagent-wf-2c606af4
+VALID_CLIENT_ID=0a49493a-7199-490d-9416-59ea6199861f
+CHECKED_UTC=2026-08-27T11:29:12Z
