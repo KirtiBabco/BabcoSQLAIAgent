@@ -1,1 +1,2 @@
 Try existing id-kvsf-github-dev identity from this repository to append the SQL Agent callback URI to Entra app 0a49493a-7199-490d-9416-59ea6199861f.
+Retry requested from live AADSTS50011 screenshot on 2026-08-27.
