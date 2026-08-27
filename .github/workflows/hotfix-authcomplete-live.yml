@@ -45,7 +45,7 @@ jobs:
           test -n "$user" && test -n "$pass"
           echo "::add-mask::$user"
           echo "::add-mask::$pass"
-          code=$(curl -sS -u "$user:$pass" -X PUT -H 'Content-Type: application/octet-stream' --data-binary @AuthComplete.aspx -o "$RUNNER_TEMP/put.out" -w '%{http_code}' "https://${APP}.scm.azurewebsites.net/api/vfs/site/wwwroot/AuthComplete.aspx")
+          code=$(curl -sS -u "$user:$pass" -X PUT -H 'If-Match: *' -H 'Content-Type: application/octet-stream' --data-binary @AuthComplete.aspx -o "$RUNNER_TEMP/put.out" -w '%{http_code}' "https://${APP}.scm.azurewebsites.net/api/vfs/site/wwwroot/AuthComplete.aspx")
           echo "KUDU_PUT_HTTP=$code" >> "$status"
           test "$code" = '200' -o "$code" = '201' -o "$code" = '204'
           az webapp restart -g "$RG" -n "$APP" --only-show-errors >/dev/null
