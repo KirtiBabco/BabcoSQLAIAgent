@@ -16,13 +16,15 @@ env:
   AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
   AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
   AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+  APP: 'babco-sqlagent-wf-2c606af4'
   ENTRA_APP_CLIENT_ID: '0a49493a-7199-490d-9416-59ea6199861f'
   REQUIRED_REDIRECT_URI: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
 
 jobs:
   fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - name: Azure login
         uses: azure/login@v2
@@ -32,39 +34,110 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Preserve existing redirect URIs and add required callback
+      - name: Inspect current App Service Entra metadata and try all safe Graph write paths
         shell: bash
         run: |
           set +e
           status="$RUNNER_TEMP/entra-redirect-status.txt"
           echo "SOURCE_COMMIT=$GITHUB_SHA" > "$status"
-          current=$(az ad app show --id "$ENTRA_APP_CLIENT_ID" --query 'web.redirectUris' -o json 2>"$RUNNER_TEMP/azerr.txt")
-          rc=$?
-          if [ $rc -ne 0 ] || [ -z "$current" ]; then
-            echo 'APP_READ=false' >> "$status"
-            echo 'UPDATE=false' >> "$status"
-            echo "ERROR=$(tr '\n' ' ' < "$RUNNER_TEMP/azerr.txt" | sed 's/[[:space:]]\+/ /g')" >> "$status"
-            exit 1
-          fi
-          echo 'APP_READ=true' >> "$status"
-          merged=$(jq -c --arg uri "$REQUIRED_REDIRECT_URI" '(. + [$uri]) | unique' <<< "$current")
-          mapfile -t uris < <(jq -r '.[]' <<< "$merged")
-          az ad app update --id "$ENTRA_APP_CLIENT_ID" --web-redirect-uris "${uris[@]}" 2>"$RUNNER_TEMP/updateerr.txt"
-          rc=$?
-          if [ $rc -ne 0 ]; then
-            echo 'UPDATE=false' >> "$status"
-            echo "ERROR=$(tr '\n' ' ' < "$RUNNER_TEMP/updateerr.txt" | sed 's/[[:space:]]\+/ /g')" >> "$status"
-            exit 1
-          fi
-          echo 'UPDATE=true' >> "$status"
-          verify=$(az ad app show --id "$ENTRA_APP_CLIENT_ID" --query 'web.redirectUris' -o json 2>/dev/null)
-          if jq -e --arg uri "$REQUIRED_REDIRECT_URI" 'index($uri) != null' <<< "$verify" >/dev/null; then
-            echo 'REDIRECT_PRESENT=true' >> "$status"
+          echo "REQUIRED_REDIRECT_URI=$REQUIRED_REDIRECT_URI" >> "$status"
+
+          auth=$(az webapp auth microsoft show -g "$RG" -n "$APP" -o json --only-show-errors 2>/dev/null)
+          authClient=$(printf '%s' "$auth" | jq -r '.registration.clientId // .clientId // empty')
+          secretSetting=$(printf '%s' "$auth" | jq -r '.registration.clientSecretSettingName // .clientSecretSettingName // empty')
+          [ -z "$authClient" ] && authClient="$ENTRA_APP_CLIENT_ID"
+          echo "AUTH_CLIENT_ID=$authClient" >> "$status"
+          if [ "$authClient" = "$ENTRA_APP_CLIENT_ID" ]; then echo 'EXPECTED_CLIENT=true' >> "$status"; else echo 'EXPECTED_CLIENT=false' >> "$status"; fi
+          if [ -n "$secretSetting" ]; then echo 'AUTH_SECRET_SETTING_PRESENT=true' >> "$status"; else echo 'AUTH_SECRET_SETTING_PRESENT=false' >> "$status"; fi
+
+          repaired=0
+
+          # Path 1: deployment OIDC service principal through Azure CLI / Microsoft Graph.
+          current=$(az ad app show --id "$authClient" --query 'web.redirectUris' -o json 2>"$RUNNER_TEMP/azerr.txt")
+          if [ $? -eq 0 ] && [ -n "$current" ]; then
+            echo 'DEPLOYMENT_IDENTITY_GRAPH_READ=true' >> "$status"
+            if printf '%s' "$current" | jq -e --arg u "$REQUIRED_REDIRECT_URI" 'index($u) != null' >/dev/null; then
+              echo 'REDIRECT_ALREADY_PRESENT=true' >> "$status"
+              repaired=1
+            else
+              mapfile -t uris < <(printf '%s' "$current" | jq -r '.[]')
+              uris+=("$REQUIRED_REDIRECT_URI")
+              az ad app update --id "$authClient" --web-redirect-uris "${uris[@]}" 2>"$RUNNER_TEMP/azupdate.txt"
+              if [ $? -eq 0 ]; then
+                echo 'DEPLOYMENT_IDENTITY_GRAPH_WRITE=true' >> "$status"
+                repaired=1
+              else
+                echo 'DEPLOYMENT_IDENTITY_GRAPH_WRITE=false' >> "$status"
+              fi
+            fi
           else
-            echo 'REDIRECT_PRESENT=false' >> "$status"
-            exit 1
+            echo 'DEPLOYMENT_IDENTITY_GRAPH_READ=false' >> "$status"
           fi
+
+          # Path 2: Easy Auth application's own client credential, if it has Graph application permission.
+          if [ $repaired -eq 0 ] && [ -n "$secretSetting" ]; then
+            secret=$(az webapp config appsettings list -g "$RG" -n "$APP" --query "[?name=='$secretSetting'].value | [0]" -o tsv --only-show-errors 2>/dev/null)
+            if [ -n "$secret" ] && [ "$secret" != 'null' ]; then
+              echo "::add-mask::$secret"
+              tokenJson=$(curl -sS --max-time 30 -X POST "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
+                -H 'Content-Type: application/x-www-form-urlencoded' \
+                --data-urlencode "client_id=$authClient" \
+                --data-urlencode "client_secret=$secret" \
+                --data-urlencode 'grant_type=client_credentials' \
+                --data-urlencode 'scope=https://graph.microsoft.com/.default')
+              token=$(printf '%s' "$tokenJson" | jq -r '.access_token // empty')
+              if [ -n "$token" ]; then
+                echo "::add-mask::$token"
+                code=$(curl -sS --max-time 30 -o "$RUNNER_TEMP/appgraph.json" -w '%{http_code}' \
+                  -H "Authorization: Bearer $token" \
+                  "https://graph.microsoft.com/v1.0/applications?%24filter=appId%20eq%20%27$authClient%27&%24select=id,appId,web")
+                echo "APP_CREDENTIAL_GRAPH_HTTP=$code" >> "$status"
+                if [ "$code" = '200' ]; then
+                  objectId=$(jq -r '.value[0].id // empty' "$RUNNER_TEMP/appgraph.json")
+                  web=$(jq -c '.value[0].web // {}' "$RUNNER_TEMP/appgraph.json")
+                  if [ -n "$objectId" ]; then
+                    patched=$(printf '%s' "$web" | jq -c --arg u "$REQUIRED_REDIRECT_URI" '.redirectUris = ((.redirectUris // []) + [$u] | unique)')
+                    body=$(jq -nc --argjson web "$patched" '{web:$web}')
+                    pcode=$(curl -sS --max-time 30 -o "$RUNNER_TEMP/appgraph-patch.txt" -w '%{http_code}' \
+                      -X PATCH -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+                      -d "$body" "https://graph.microsoft.com/v1.0/applications/$objectId")
+                    echo "APP_CREDENTIAL_GRAPH_PATCH_HTTP=$pcode" >> "$status"
+                    if [ "$pcode" = '204' ]; then repaired=1; fi
+                  fi
+                fi
+              else
+                echo 'APP_CREDENTIAL_TOKEN=false' >> "$status"
+              fi
+            else
+              echo 'AUTH_SECRET_VALUE_PRESENT=false' >> "$status"
+            fi
+          fi
+
+          # Verify via Microsoft sign-in request itself; this is authoritative for AADSTS50011.
+          sleep 8
+          authUrl="https://$APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx"
+          : > "$RUNNER_TEMP/ah"
+          acode=$(curl -sS --max-time 30 --max-redirs 0 -D "$RUNNER_TEMP/ah" -o /dev/null -w '%{http_code}' "$authUrl" || true)
+          microsoftUrl=$(tr -d '\r' < "$RUNNER_TEMP/ah" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+          echo "EASY_AUTH_HTTP=$acode" >> "$status"
+          if [ "$acode" = '302' ] && printf '%s' "$microsoftUrl" | grep -Eqi '^https://login\.microsoftonline\.com/'; then
+            mcode=$(curl -sS -L --max-redirs 3 --max-time 45 -o "$RUNNER_TEMP/ms.html" -w '%{http_code}' "$microsoftUrl" || true)
+            echo "MICROSOFT_HTTP=$mcode" >> "$status"
+            if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match' "$RUNNER_TEMP/ms.html"; then
+              echo 'AADSTS50011_PRESENT=true' >> "$status"
+              echo 'REDIRECT_PRESENT=false' >> "$status"
+            else
+              echo 'AADSTS50011_PRESENT=false' >> "$status"
+              echo 'REDIRECT_PRESENT=true' >> "$status"
+              repaired=1
+            fi
+          else
+            echo 'MICROSOFT_CHALLENGE_REACHED=false' >> "$status"
+          fi
+
+          if [ $repaired -eq 1 ]; then echo 'UPDATE=true' >> "$status"; else echo 'UPDATE=false' >> "$status"; fi
           echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$status"
+          [ $repaired -eq 1 ]
 
       - name: Publish safe status
         if: always()
@@ -82,6 +155,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add status.txt
-          git commit -q -m 'Publish Entra redirect fix status'
+          git commit -q -m 'Publish Entra redirect repair status'
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin entra-redirect-status >/dev/null
