@@ -1,0 +1,1 @@
+Create a dedicated SQL Agent Entra app registration with the exact Easy Auth callback if the deployment identity is allowed; configure target only and verify AADSTS50011 is gone.
