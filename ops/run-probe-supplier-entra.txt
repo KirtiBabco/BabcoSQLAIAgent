@@ -1,0 +1,1 @@
+Probe existing supplier-connect Entra client 636abdef-bcb6-407d-9334-c89079f29da8 against SQL Agent callback; if valid apply it with supported auth microsoft update and verify live sign-in.
