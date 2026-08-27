@@ -1,0 +1,1 @@
+Probe only rg-babco-rnd-sandbox Entra clients for SQL Agent callback and apply a validated existing client.
