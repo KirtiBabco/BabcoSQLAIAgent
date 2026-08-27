@@ -1,0 +1,7 @@
+SOURCE_COMMIT=391ec4775f10964fa99c764ceca339c12cbe40e3
+APP=app-babco-sales-placement-rnd|CLIENT_ID=a44e077f-5c53-4b78-87a4-322c06b2f5f3|SECRET_PRESENT=false|ISSUER=https://login.microsoftonline.com/7e3bfe8e-acb5-4e0e-9798-c05331d2940c/v2.0
+APP=app-babco-supplierconnect-suhana-rnd|CLIENT_ID=636abdef-bcb6-407d-9334-c89079f29da8|SECRET_PRESENT=true|ISSUER=https://login.microsoftonline.com/7e3bfe8e-acb5-4e0e-9798-c05331d2940c/v2.0
+APP=babco-sqlagent-wf-2c606af4|CLIENT_ID=0a49493a-7199-490d-9416-59ea6199861f|SECRET_PRESENT=true|ISSUER=https://sts.windows.net/7e3bfe8e-acb5-4e0e-9798-c05331d2940c/v2.0
+APP=app-babco-unloadcompare-0e27b0b7-260818|CLIENT_ID=0a49493a-7199-490d-9416-59ea6199861f|SECRET_PRESENT=true|ISSUER=https://sts.windows.net/7e3bfe8e-acb5-4e0e-9798-c05331d2940c/v2.0
+CLIENT_CONFIG_COUNT=4
+CHECKED_UTC=2026-08-27T10:57:15Z
