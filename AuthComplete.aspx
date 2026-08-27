@@ -1,5 +1,6 @@
 <%@ Page Language="C#" %>
 <%@ Import Namespace="System" %>
+<%@ Import Namespace="SQL_AI_Agent" %>
 <script runat="server">
     protected void Page_Load(object sender, EventArgs e)
     {
