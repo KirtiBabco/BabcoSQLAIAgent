@@ -1,0 +1,63 @@
+name: Probe Existing Supplier Entra Client Only
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/probe-supplier-client-only.yml'
+      - 'ops/run-probe-supplier-only.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  TENANT: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  CLIENT: '636abdef-bcb6-407d-9334-c89079f29da8'
+  CALLBACK: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe exact callback
+        shell: pwsh
+        run: |
+          $s=Join-Path $env:RUNNER_TEMP 'status.txt'
+          "SOURCE_COMMIT=$env:GITHUB_SHA" | Set-Content $s
+          $u=[uri]::EscapeDataString($env:CALLBACK)
+          $url="https://login.microsoftonline.com/$($env:TENANT)/oauth2/v2.0/authorize?client_id=$($env:CLIENT)&response_type=code&redirect_uri=$u&response_mode=query&scope=openid%20profile%20email&state=probe123&nonce=probe123&prompt=login"
+          try {
+            $r=Invoke-WebRequest -Uri $url -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 25 -ErrorAction Stop
+            $body=[string]$r.Content
+            "PROBE_HTTP=$([int]$r.StatusCode)" | Add-Content $s
+          } catch {
+            $body=''
+            $code=0
+            try {$code=[int]$_.Exception.Response.StatusCode.value__} catch {}
+            try {
+              $stream=$_.Exception.Response.GetResponseStream(); if($stream){$reader=New-Object IO.StreamReader($stream);$body=$reader.ReadToEnd();$reader.Close()}
+            } catch {}
+            "PROBE_HTTP=$code" | Add-Content $s
+          }
+          if($body -match 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match'){
+            'CANDIDATE_ACCEPTS_CALLBACK=false' | Add-Content $s
+            exit 1
+          }
+          if($body -match 'AADSTS([0-9]+)'){
+            "CANDIDATE_OTHER_AAD_ERROR=$($Matches[1])" | Add-Content $s
+            exit 1
+          }
+          'CANDIDATE_ACCEPTS_CALLBACK=true' | Add-Content $s
+      - name: Publish
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $d=Join-Path $env:RUNNER_TEMP 'pub';New-Item -ItemType Directory -Force -Path $d|Out-Null
+          $p=Join-Path $env:RUNNER_TEMP 'status.txt';if(Test-Path $p){Copy-Item $p (Join-Path $d 'status.txt')}else{'RUN_FAILED=true'|Set-Content (Join-Path $d 'status.txt')}
+          Add-Content (Join-Path $d 'status.txt') "CHECKED_UTC=$([DateTime]::UtcNow.ToString('o'))"
+          Push-Location $d;git init -q;git checkout -q -b entra-supplier-probe-status;git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add status.txt;git commit -q -m 'Publish supplier Entra probe';git remote add origin "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git";git push --force origin entra-supplier-probe-status | Out-Null;Pop-Location
