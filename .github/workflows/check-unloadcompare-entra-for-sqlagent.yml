@@ -18,6 +18,7 @@ env:
   AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
   RG: 'rg-babco-rnd-sandbox'
   SOURCE_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
+  TARGET_APP: 'babco-sqlagent-wf-2c606af4'
   CALLBACK: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
 
 jobs:
@@ -38,15 +39,23 @@ jobs:
           status="$RUNNER_TEMP/status.txt"
           auth=$(az webapp auth microsoft show -g "$RG" -n "$SOURCE_APP" -o json --only-show-errors)
           client=$(printf '%s' "$auth" | jq -r '.registration.clientId // .clientId // empty')
+          secretSetting=$(printf '%s' "$auth" | jq -r '.registration.clientSecretSettingName // .clientSecretSettingName // empty')
           test -n "$client"
           encoded=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CALLBACK")
           url="https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/authorize?client_id=$client&response_type=code&redirect_uri=$encoded&response_mode=query&scope=openid&state=check&nonce=check"
           curl -sS -L --max-redirs 5 --max-time 45 -o "$RUNNER_TEMP/ms.html" "$url" || true
           echo "SOURCE_CLIENT_ID=$client" > "$status"
+          echo "SOURCE_SECRET_SETTING=$secretSetting" >> "$status"
           if grep -Eqi 'AADSTS50011|redirect URI.*does not match|reply URL.*does not match' "$RUNNER_TEMP/ms.html"; then
             echo 'SOURCE_ACCEPTS_SQLAGENT_CALLBACK=false' >> "$status"
           else
             echo 'SOURCE_ACCEPTS_SQLAGENT_CALLBACK=true' >> "$status"
+          fi
+          if [ -n "$secretSetting" ]; then
+            present=$(az webapp config appsettings list -g "$RG" -n "$TARGET_APP" --query "length([?name=='$secretSetting'])" -o tsv --only-show-errors)
+            if [ "$present" != '0' ]; then echo 'TARGET_HAS_SOURCE_SECRET_SETTING=true' >> "$status"; else echo 'TARGET_HAS_SOURCE_SECRET_SETTING=false' >> "$status"; fi
+          else
+            echo 'TARGET_HAS_SOURCE_SECRET_SETTING=false' >> "$status"
           fi
 
       - name: Publish status
