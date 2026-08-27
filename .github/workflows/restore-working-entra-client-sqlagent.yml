@@ -1,0 +1,101 @@
+name: Restore Working Entra Client To SQL Agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/restore-working-entra-client-sqlagent.yml'
+      - 'ops/run-restore-working-entra-client.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+  TARGET_APP: 'babco-sqlagent-wf-2c606af4'
+  CLIENT_ID: '0a49493a-7199-490d-9416-59ea6199861f'
+  SECRET_SETTING: 'MICROSOFT_PROVIDER_AUTHENTICATION_SECRET'
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Restore target Easy Auth to validated working client
+        shell: bash
+        run: |
+          set -euo pipefail
+          s="$RUNNER_TEMP/status.txt"
+          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$s"
+          present=$(az webapp config appsettings list -g "$RG" -n "$TARGET_APP" --query "length([?name=='$SECRET_SETTING'])" -o tsv --only-show-errors)
+          test "$present" != '0'
+          issuer="https://login.microsoftonline.com/${AZURE_TENANT_ID}/v2.0"
+          az webapp auth microsoft update -g "$RG" -n "$TARGET_APP" --client-id "$CLIENT_ID" --client-secret-setting-name "$SECRET_SETTING" --issuer "$issuer" --yes --only-show-errors >/dev/null
+          az webapp auth update -g "$RG" -n "$TARGET_APP" --enabled true --unauthenticated-client-action AllowAnonymous --require-https true --enable-token-store true --only-show-errors >/dev/null
+          az webapp restart -g "$RG" -n "$TARGET_APP" --only-show-errors >/dev/null
+          echo "TARGET_CLIENT_ID=$CLIENT_ID" >> "$s"
+          echo 'AUTH_RESTORE=true' >> "$s"
+
+      - name: Strict Microsoft-side verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          s="$RUNNER_TEMP/status.txt"
+          login="https://${TARGET_APP}.azurewebsites.net/Login.aspx"
+          code=0
+          for i in $(seq 1 36); do
+            code=$(curl -sS -L --max-time 20 -o "$RUNNER_TEMP/login.html" -w '%{http_code}' "$login" || true)
+            [ "$code" = '200' ] && break
+            sleep 5
+          done
+          echo "LOGIN_HTTP=$code" >> "$s"
+          auth="https://${TARGET_APP}.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx"
+          curl -sS --max-redirs 0 --max-time 25 -D "$RUNNER_TEMP/h" -o /dev/null "$auth" || true
+          loc=$(tr -d '\r' < "$RUNNER_TEMP/h" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+          if ! printf '%s' "$loc" | grep -Eqi '^https://login\.microsoftonline\.com/'; then
+            echo 'ENTRA_CHALLENGE=false' >> "$s"
+            echo 'VERIFY=failure' >> "$s"
+            exit 1
+          fi
+          echo 'ENTRA_CHALLENGE=true' >> "$s"
+          curl -sS -L --max-redirs 5 --max-time 45 -o "$RUNNER_TEMP/ms.html" "$loc" || true
+          if grep -Eqi 'AADSTS50011|redirect URI.*does not match|reply URL.*does not match' "$RUNNER_TEMP/ms.html"; then
+            echo 'AADSTS50011_PRESENT=true' >> "$s"
+            echo 'VERIFY=failure' >> "$s"
+            exit 1
+          fi
+          echo 'AADSTS50011_PRESENT=false' >> "$s"
+          echo 'VERIFY=success' >> "$s"
+          echo "LIVE_URL=$login" >> "$s"
+
+      - name: Publish status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/pub"; mkdir -p "$d"
+          cp "$RUNNER_TEMP/status.txt" "$d/status.txt" 2>/dev/null || echo 'RUN_FAILED=true' > "$d/status.txt"
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$d/status.txt"
+          cd "$d"
+          git init -q
+          git checkout -q -b restore-working-entra-status
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt
+          git commit -q -m 'Publish working Entra restore status'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin restore-working-entra-status >/dev/null
