@@ -1,0 +1,161 @@
+name: Recover SQL Agent Entra From Existing Client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/recover-entra-from-existing-client.yml'
+      - 'ops/run-recover-entra-existing.txt'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  RG: 'rg-babco-rnd-sandbox'
+  TARGET_APP: 'babco-sqlagent-wf-2c606af4'
+  CALLBACK_URI: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Find an existing Entra client that already accepts SQL Agent callback
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$RUNNER_TEMP/recover-status.txt"
+          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$status"
+          echo "CALLBACK_URI=$CALLBACK_URI" >> "$status"
+          found=0
+          : > "$RUNNER_TEMP/candidates.tsv"
+
+          apps=$(az webapp list --query '[].{name:name,rg:resourceGroup}' -o tsv --only-show-errors)
+          while IFS=$'\t' read -r app rg; do
+            [ -z "$app" ] && continue
+            auth=$(az webapp auth microsoft show -g "$rg" -n "$app" -o json --only-show-errors 2>/dev/null || true)
+            client=$(printf '%s' "$auth" | jq -r '.registration.clientId // empty' 2>/dev/null || true)
+            secretSetting=$(printf '%s' "$auth" | jq -r '.registration.clientSecretSettingName // empty' 2>/dev/null || true)
+            issuer=$(printf '%s' "$auth" | jq -r '.registration.openIdIssuer // empty' 2>/dev/null || true)
+            audience=$(printf '%s' "$auth" | jq -r '.validation.allowedAudiences[0] // empty' 2>/dev/null || true)
+            if [ -z "$client" ]; then
+              classic=$(az webapp auth-classic show -g "$rg" -n "$app" -o json --only-show-errors 2>/dev/null || true)
+              client=$(printf '%s' "$classic" | jq -r '.clientId // .aadClientId // empty' 2>/dev/null || true)
+              secretSetting=$(printf '%s' "$classic" | jq -r '.clientSecretSettingName // .aadClientSecretSettingName // empty' 2>/dev/null || true)
+              issuer=$(printf '%s' "$classic" | jq -r '.issuer // .aadTokenIssuerUrl // empty' 2>/dev/null || true)
+              audience=$(printf '%s' "$classic" | jq -r '(.allowedAudiences // .aadAllowedTokenAudiences // [])[0] // empty' 2>/dev/null || true)
+            fi
+            [ -z "$client" ] && continue
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$app" "$rg" "$client" "$secretSetting" "$issuer" "$audience" >> "$RUNNER_TEMP/candidates.tsv"
+          done <<< "$apps"
+
+          sort -u -t $'\t' -k3,3 "$RUNNER_TEMP/candidates.tsv" > "$RUNNER_TEMP/candidates-unique.tsv"
+          while IFS=$'\t' read -r app rg client secretSetting issuer audience; do
+            [ -z "$client" ] && continue
+            encRedirect=$(python3 -c 'import urllib.parse,os; print(urllib.parse.quote(os.environ["CALLBACK_URI"], safe=""))')
+            url="https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/authorize?client_id=${client}&response_type=code&redirect_uri=${encRedirect}&response_mode=query&scope=openid%20profile%20email&state=probe&nonce=probe&prompt=login"
+            code=$(curl -sS -L --max-redirs 3 --max-time 35 -o "$RUNNER_TEMP/ms.html" -w '%{http_code}' "$url" || true)
+            if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match' "$RUNNER_TEMP/ms.html"; then
+              echo "CANDIDATE_REJECTED=$app:$client" >> "$status"
+              continue
+            fi
+            if ! grep -Eqi 'Microsoft|Sign in|login' "$RUNNER_TEMP/ms.html"; then
+              echo "CANDIDATE_INCONCLUSIVE=$app:$client:HTTP_$code" >> "$status"
+              continue
+            fi
+            [ -z "$secretSetting" ] && { echo "CANDIDATE_NO_SECRET_SETTING=$app:$client" >> "$status"; continue; }
+            secret=$(az webapp config appsettings list -g "$rg" -n "$app" --query "[?name=='$secretSetting'].value | [0]" -o tsv --only-show-errors 2>/dev/null || true)
+            [ -z "$secret" ] || [ "$secret" = 'null' ] && { echo "CANDIDATE_NO_SECRET_VALUE=$app:$client" >> "$status"; continue; }
+            echo "::add-mask::$secret"
+            printf '%s' "$app" > "$RUNNER_TEMP/source-app.txt"
+            printf '%s' "$rg" > "$RUNNER_TEMP/source-rg.txt"
+            printf '%s' "$client" > "$RUNNER_TEMP/client.txt"
+            printf '%s' "$secretSetting" > "$RUNNER_TEMP/secret-setting.txt"
+            printf '%s' "$secret" > "$RUNNER_TEMP/secret.txt"
+            printf '%s' "$issuer" > "$RUNNER_TEMP/issuer.txt"
+            printf '%s' "$audience" > "$RUNNER_TEMP/audience.txt"
+            echo "VALID_CLIENT_FOUND=true" >> "$status"
+            echo "VALID_CLIENT_SOURCE_APP=$app" >> "$status"
+            echo "VALID_CLIENT_ID=$client" >> "$status"
+            found=1
+            break
+          done < "$RUNNER_TEMP/candidates-unique.tsv"
+
+          if [ "$found" -ne 1 ]; then
+            echo 'VALID_CLIENT_FOUND=false' >> "$status"
+            exit 1
+          fi
+
+      - name: Apply only the validated Entra provider to SQL Agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$RUNNER_TEMP/recover-status.txt"
+          client=$(cat "$RUNNER_TEMP/client.txt")
+          secretSetting=$(cat "$RUNNER_TEMP/secret-setting.txt")
+          secret=$(cat "$RUNNER_TEMP/secret.txt")
+          issuer=$(cat "$RUNNER_TEMP/issuer.txt")
+          audience=$(cat "$RUNNER_TEMP/audience.txt")
+          echo "::add-mask::$secret"
+
+          az webapp config appsettings set -g "$RG" -n "$TARGET_APP" --settings "$secretSetting=$secret" --only-show-errors >/dev/null
+          args=(az webapp auth-classic update -g "$RG" -n "$TARGET_APP" --enabled true --action AllowAnonymous --aad-client-id "$client" --aad-client-secret-setting-name "$secretSetting" --token-store true --only-show-errors)
+          [ -n "$issuer" ] && args+=(--aad-token-issuer-url "$issuer")
+          [ -n "$audience" ] && args+=(--aad-allowed-token-audiences "$audience")
+          "${args[@]}" >/dev/null
+          az webapp restart -g "$RG" -n "$TARGET_APP" --only-show-errors >/dev/null
+          echo 'AUTH_APPLIED=true' >> "$status"
+
+      - name: Verify Microsoft sign-in no longer has redirect mismatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$RUNNER_TEMP/recover-status.txt"
+          sleep 15
+          authUrl="https://${TARGET_APP}.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx"
+          : > "$RUNNER_TEMP/h"
+          acode=$(curl -sS --max-time 30 --max-redirs 0 -D "$RUNNER_TEMP/h" -o /dev/null -w '%{http_code}' "$authUrl" || true)
+          murl=$(tr -d '\r' < "$RUNNER_TEMP/h" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+          echo "EASY_AUTH_HTTP=$acode" >> "$status"
+          test "$acode" = '302'
+          printf '%s' "$murl" | grep -Eqi '^https://login\.microsoftonline\.com/'
+          mcode=$(curl -sS -L --max-redirs 3 --max-time 45 -o "$RUNNER_TEMP/ms-final.html" -w '%{http_code}' "$murl" || true)
+          echo "MICROSOFT_HTTP=$mcode" >> "$status"
+          if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match' "$RUNNER_TEMP/ms-final.html"; then
+            echo 'AADSTS50011_PRESENT=true' >> "$status"
+            echo 'VERIFY=failure' >> "$status"
+            exit 1
+          fi
+          echo 'AADSTS50011_PRESENT=false' >> "$status"
+          echo 'VERIFY=success' >> "$status"
+          echo "LIVE_URL=https://${TARGET_APP}.azurewebsites.net/Login.aspx" >> "$status"
+
+      - name: Publish status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/pub"; mkdir -p "$d"
+          p="$RUNNER_TEMP/recover-status.txt"
+          if [ -f "$p" ]; then cp "$p" "$d/status.txt"; else echo 'RUN_FAILED=true' > "$d/status.txt"; fi
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$d/status.txt"
+          cd "$d"
+          git init -q; git checkout -q -b entra-existing-client-status
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt; git commit -q -m 'Publish existing-client Entra recovery status'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin entra-existing-client-status >/dev/null
