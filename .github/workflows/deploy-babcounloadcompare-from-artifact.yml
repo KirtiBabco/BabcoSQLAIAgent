@@ -18,7 +18,7 @@ env:
   TARGET_RG: 'rg-babco-rnd-sandbox'
   TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
   TARGET_URL: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
-  EXPECTED_SOURCE_COMMIT: '15e6e102175be3092b0fbe16feccfe3330bb2f63'
+  EXPECTED_SOURCE_COMMIT: 'f0db3d9f76cbcb6f4497d382db7f3e8901de70af'
 
 jobs:
   deploy-and-verify:
@@ -56,7 +56,7 @@ jobs:
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'This is a prototype and not the final production website.'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'PackingSlip receiving & count'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'stdLabsLogo'
-          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'babco-labs-website/main/assets/logo/part-1.txt'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'Email-Teams-Follow-Up-Capture/main/app/assets/babco-labs-logo.svg'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'std-user-card'
           echo "PACKAGE_SHA256=$(sha256sum "$RUNNER_TEMP/webapp-publish.zip" | awk '{print $1}')"
 
@@ -94,13 +94,17 @@ jobs:
           test "$ok" = '1'
 
           auth_url="https://$TARGET_APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx"
-          : > "$RUNNER_TEMP/ah"
-          acode=$(curl -sS --max-time 20 --max-redirs 0 -D "$RUNNER_TEMP/ah" -o "$RUNNER_TEMP/ab" -w '%{http_code}' "$auth_url" || true)
-          aloc=$(tr -d '\r' < "$RUNNER_TEMP/ah" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
-          echo "ENTRA_HTTP=$acode"
-          echo "ENTRA_LOCATION=$aloc"
-          test "$acode" = '302'
-          printf '%s' "$aloc" | grep -Eqi '^https://login\.(windows\.net|microsoftonline\.com)/'
+          auth_ok=0
+          for i in $(seq 1 12); do
+            : > "$RUNNER_TEMP/ah"
+            acode=$(curl -sS --max-time 20 --max-redirs 0 -D "$RUNNER_TEMP/ah" -o "$RUNNER_TEMP/ab" -w '%{http_code}' "$auth_url" || true)
+            aloc=$(tr -d '\r' < "$RUNNER_TEMP/ah" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
+            echo "ENTRA_$i HTTP=$acode LOCATION=$aloc"
+            if [ "$acode" = '302' ] && printf '%s' "$aloc" | grep -Eqi '^https://login\.(windows\.net|microsoftonline\.com)/'; then auth_ok=1; break; fi
+            sleep 5
+          done
+          test "$auth_ok" = '1'
           echo 'LIVE_PAGE_OK=true'
           echo 'ENTRA_OK=true'
+          echo 'STD_POLICY_SVG_LOGO_OK=true'
           echo 'VERIFIED_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
