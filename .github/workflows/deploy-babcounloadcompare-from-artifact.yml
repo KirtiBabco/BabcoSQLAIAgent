@@ -18,7 +18,7 @@ env:
   TARGET_RG: 'rg-babco-rnd-sandbox'
   TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
   TARGET_URL: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
-  EXPECTED_SOURCE_COMMIT: 'a3fc80e57b1ac4318b0cb561c3f31f68af84df02'
+  EXPECTED_SOURCE_COMMIT: '15e6e102175be3092b0fbe16feccfe3330bb2f63'
 
 jobs:
   deploy-and-verify:
@@ -55,6 +55,9 @@ jobs:
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'Without AI'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'This is a prototype and not the final production website.'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'PackingSlip receiving & count'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'stdLabsLogo'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'babco-labs-website/main/assets/logo/part-1.txt'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'std-user-card'
           echo "PACKAGE_SHA256=$(sha256sum "$RUNNER_TEMP/webapp-publish.zip" | awk '{print $1}')"
 
       - name: Deploy through Azure ARM using OIDC
