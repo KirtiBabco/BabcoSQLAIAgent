@@ -18,7 +18,8 @@ env:
   TARGET_RG: 'rg-babco-rnd-sandbox'
   TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
   TARGET_URL: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
-  EXPECTED_SOURCE_COMMIT: 'f0db3d9f76cbcb6f4497d382db7f3e8901de70af'
+  STD_SWA_NAME: 'babco-followup-capture-demo'
+  EXPECTED_SOURCE_COMMIT: '2f8b7352e052133bb351d738330a93fdd9bdcd94'
 
 jobs:
   deploy-and-verify:
@@ -55,10 +56,36 @@ jobs:
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'Without AI'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'This is a prototype and not the final production website.'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'PackingSlip receiving & count'
-          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'stdLabsLogo'
-          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'Email-Teams-Follow-Up-Capture/main/app/assets/babco-labs-logo.svg'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq '~/Content/babco-labs-logo.svg'
+          if unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'std-brand-fallback'; then echo 'BL fallback still present' >&2; exit 1; fi
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'std-user-card'
+
+      - name: Inject canonical STD Policies SVG into deploy package
+        shell: bash
+        run: |
+          set -euo pipefail
+          STD_HOST="$(az staticwebapp show -g "$TARGET_RG" -n "$STD_SWA_NAME" --query defaultHostname -o tsv --only-show-errors)"
+          test -n "$STD_HOST"
+          echo "STD_POLICIES_HOST=$STD_HOST"
+          curl -fsSL "https://$STD_HOST/assets/babco-labs-logo.svg" -o "$RUNNER_TEMP/babco-labs-logo.svg"
+          test -s "$RUNNER_TEMP/babco-labs-logo.svg"
+          grep -Fq '<svg' "$RUNNER_TEMP/babco-labs-logo.svg"
+          grep -Fq 'Babco Labs' "$RUNNER_TEMP/babco-labs-logo.svg"
+
+          rm -rf "$RUNNER_TEMP/pkg"
+          mkdir -p "$RUNNER_TEMP/pkg/Content"
+          unzip -q "$RUNNER_TEMP/webapp-publish.zip" -d "$RUNNER_TEMP/pkg"
+          cp "$RUNNER_TEMP/babco-labs-logo.svg" "$RUNNER_TEMP/pkg/Content/babco-labs-logo.svg"
+          test -s "$RUNNER_TEMP/pkg/Content/babco-labs-logo.svg"
+          grep -Fq '~/Content/babco-labs-logo.svg' "$RUNNER_TEMP/pkg/Site.Master"
+          if grep -Fq 'std-brand-fallback' "$RUNNER_TEMP/pkg/Site.Master"; then echo 'BL fallback still present in package' >&2; exit 1; fi
+
+          rm -f "$RUNNER_TEMP/webapp-publish.zip"
+          (cd "$RUNNER_TEMP/pkg" && zip -qr "$RUNNER_TEMP/webapp-publish.zip" .)
+          unzip -Z1 "$RUNNER_TEMP/webapp-publish.zip" | grep -Fxq 'Content/babco-labs-logo.svg'
           echo "PACKAGE_SHA256=$(sha256sum "$RUNNER_TEMP/webapp-publish.zip" | awk '{print $1}')"
+          echo 'LOCAL_STD_SVG_PACKAGED=true'
+          echo 'BL_FALLBACK_REMOVED=true'
 
       - name: Deploy through Azure ARM using OIDC
         shell: bash
@@ -78,7 +105,7 @@ jobs:
           diff -u "$RUNNER_TEMP/appsettings-before.txt" "$RUNNER_TEMP/appsettings-after.txt"
           echo 'CONFIG_PRESERVED=true'
 
-      - name: Verify live WebForms page and Entra redirect
+      - name: Verify live page, local SVG logo and Entra redirect
         shell: bash
         run: |
           set -euo pipefail
@@ -93,6 +120,16 @@ jobs:
           done
           test "$ok" = '1'
 
+          logo_ok=0
+          logo_url="https://$TARGET_APP.azurewebsites.net/Content/babco-labs-logo.svg"
+          for i in $(seq 1 20); do
+            lcode=$(curl -sS --max-time 20 -o "$RUNNER_TEMP/live-logo.svg" -w '%{http_code}' "$logo_url" || true)
+            echo "LOGO_$i HTTP=$lcode"
+            if [ "$lcode" = '200' ] && grep -Fq '<svg' "$RUNNER_TEMP/live-logo.svg" && grep -Fq 'Babco Labs' "$RUNNER_TEMP/live-logo.svg"; then logo_ok=1; break; fi
+            sleep 5
+          done
+          test "$logo_ok" = '1'
+
           auth_url="https://$TARGET_APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx"
           auth_ok=0
           for i in $(seq 1 12); do
@@ -105,6 +142,7 @@ jobs:
           done
           test "$auth_ok" = '1'
           echo 'LIVE_PAGE_OK=true'
+          echo 'LIVE_LOCAL_SVG_OK=true'
+          echo 'BL_FALLBACK_ABSENT=true'
           echo 'ENTRA_OK=true'
-          echo 'STD_POLICY_SVG_LOGO_OK=true'
           echo 'VERIFIED_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
