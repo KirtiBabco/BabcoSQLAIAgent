@@ -18,7 +18,7 @@ env:
   TARGET_RG: 'rg-babco-rnd-sandbox'
   TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
   TARGET_URL: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
-  EXPECTED_SOURCE_COMMIT: 'af69bf29747c63ea7b0d5ecb62f52ccb0dc0690b'
+  EXPECTED_SOURCE_COMMIT: 'a3fc80e57b1ac4318b0cb561c3f31f68af84df02'
 
 jobs:
   deploy-and-verify:
@@ -51,7 +51,8 @@ jobs:
           curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/webapp-publish.zip' -o "$RUNNER_TEMP/webapp-publish.zip"
           unzip -t "$RUNNER_TEMP/webapp-publish.zip" >/dev/null
           for f in Default.aspx UnloadCompare.aspx Site.Master Web.config bin/BabcoUnloadCompare.Web.dll; do unzip -Z1 "$RUNNER_TEMP/webapp-publish.zip" | grep -Fxq "$f"; done
-          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'font-size:24px'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'standard-app-header'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'Without AI'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'This is a prototype and not the final production website.'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'PackingSlip receiving & count'
           echo "PACKAGE_SHA256=$(sha256sum "$RUNNER_TEMP/webapp-publish.zip" | awk '{print $1}')"
