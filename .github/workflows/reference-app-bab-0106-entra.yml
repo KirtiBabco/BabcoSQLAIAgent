@@ -1,0 +1,109 @@
+name: Reference APP-BAB-0106 Entra
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'ops/run-reference-app-bab-0106-entra.txt'
+      - '.github/workflows/reference-app-bab-0106-entra.yml'
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  TARGET_APP: 'babco-sqlagent-wf-2c606af4'
+  TARGET_RG: 'rg-babco-rnd-sandbox'
+  REF_NAME: 'APP-BAB-0106'
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Inspect reference and target auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/status.txt"
+          : > "$out"
+
+          ref=$(az webapp list --query "[?tolower(name)=='app-bab-0106'] | [0]" -o json --only-show-errors)
+          if [ "$ref" = "null" ] || [ -z "$ref" ]; then
+            ref=$(az resource list --query "[?tolower(name)=='app-bab-0106'] | [0]" -o json --only-show-errors)
+          fi
+          if [ "$ref" = "null" ] || [ -z "$ref" ]; then
+            echo 'REFERENCE_FOUND=false' >> "$out"
+            echo 'VERIFY=failure' >> "$out"
+            exit 0
+          fi
+
+          ref_name=$(printf '%s' "$ref" | jq -r '.name')
+          ref_rg=$(printf '%s' "$ref" | jq -r '.resourceGroup')
+          ref_type=$(printf '%s' "$ref" | jq -r '.type')
+          echo "REFERENCE_FOUND=true" >> "$out"
+          echo "REFERENCE_NAME=$ref_name" >> "$out"
+          echo "REFERENCE_RG=$ref_rg" >> "$out"
+          echo "REFERENCE_TYPE=$ref_type" >> "$out"
+
+          if [[ "${ref_type,,}" != "microsoft.web/sites" ]]; then
+            echo 'REFERENCE_IS_WEBAPP=false' >> "$out"
+            echo 'VERIFY=failure' >> "$out"
+            exit 0
+          fi
+          echo 'REFERENCE_IS_WEBAPP=true' >> "$out"
+
+          ra=$(az webapp auth show -g "$ref_rg" -n "$ref_name" -o json --only-show-errors)
+          ta=$(az webapp auth show -g "$TARGET_RG" -n "$TARGET_APP" -o json --only-show-errors)
+          rm=$(az webapp auth microsoft show -g "$ref_rg" -n "$ref_name" -o json --only-show-errors)
+          tm=$(az webapp auth microsoft show -g "$TARGET_RG" -n "$TARGET_APP" -o json --only-show-errors)
+
+          echo "REF_AUTH_ENABLED=$(printf '%s' "$ra" | jq -r '.enabled // false')" >> "$out"
+          echo "REF_REQUIRE_AUTH=$(printf '%s' "$ra" | jq -r '.globalValidation.requireAuthentication // false')" >> "$out"
+          echo "REF_UNAUTH_ACTION=$(printf '%s' "$ra" | jq -r '.globalValidation.unauthenticatedClientAction // empty')" >> "$out"
+          echo "REF_DEFAULT_PROVIDER=$(printf '%s' "$ra" | jq -r '.globalValidation.redirectToProvider // empty')" >> "$out"
+          echo "REF_TOKEN_STORE=$(printf '%s' "$ra" | jq -r '.login.tokenStore.enabled // false')" >> "$out"
+          echo "REF_CLIENT_ID=$(printf '%s' "$rm" | jq -r '.registration.clientId // .clientId // empty')" >> "$out"
+          echo "REF_SECRET_SETTING=$(printf '%s' "$rm" | jq -r '.registration.clientSecretSettingName // .clientSecretSettingName // empty')" >> "$out"
+          echo "REF_ISSUER=$(printf '%s' "$rm" | jq -r '.registration.openIdIssuer // .openIdIssuer // empty')" >> "$out"
+          echo "REF_LOGIN_SCOPES=$(printf '%s' "$rm" | jq -r '(.login.loginParameters // []) | join(",")')" >> "$out"
+
+          echo "TARGET_AUTH_ENABLED=$(printf '%s' "$ta" | jq -r '.enabled // false')" >> "$out"
+          echo "TARGET_REQUIRE_AUTH=$(printf '%s' "$ta" | jq -r '.globalValidation.requireAuthentication // false')" >> "$out"
+          echo "TARGET_UNAUTH_ACTION=$(printf '%s' "$ta" | jq -r '.globalValidation.unauthenticatedClientAction // empty')" >> "$out"
+          echo "TARGET_DEFAULT_PROVIDER=$(printf '%s' "$ta" | jq -r '.globalValidation.redirectToProvider // empty')" >> "$out"
+          echo "TARGET_TOKEN_STORE=$(printf '%s' "$ta" | jq -r '.login.tokenStore.enabled // false')" >> "$out"
+          echo "TARGET_CLIENT_ID=$(printf '%s' "$tm" | jq -r '.registration.clientId // .clientId // empty')" >> "$out"
+          echo "TARGET_SECRET_SETTING=$(printf '%s' "$tm" | jq -r '.registration.clientSecretSettingName // .clientSecretSettingName // empty')" >> "$out"
+          echo "TARGET_ISSUER=$(printf '%s' "$tm" | jq -r '.registration.openIdIssuer // .openIdIssuer // empty')" >> "$out"
+          echo 'VERIFY=success' >> "$out"
+
+      - name: Publish status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/pub"; mkdir -p "$d"
+          cp "$RUNNER_TEMP/status.txt" "$d/status.txt" 2>/dev/null || echo 'RUN_FAILED=true' > "$d/status.txt"
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$d/status.txt"
+          cd "$d"
+          git init -q
+          git checkout -q -b reference-app-bab-0106-status
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt
+          git commit -q -m 'Publish APP-BAB-0106 Entra reference status'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin reference-app-bab-0106-status >/dev/null
