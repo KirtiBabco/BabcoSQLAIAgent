@@ -1,11 +1,8 @@
-name: Recover SQL Agent Entra From Existing App
+name: Temporary SQL Agent Test Login Recovery
 
 on:
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/recover-sqlagent-entra-from-existing-app.yml'
-      - 'ops/run-recover-sqlagent-entra.txt'
   workflow_dispatch:
 
 permissions:
@@ -16,145 +13,113 @@ env:
   AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
   AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
   AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
-  TARGET_RG: 'rg-babco-rnd-sandbox'
-  TARGET_APP: 'babco-sqlagent-wf-2c606af4'
-  CALLBACK_URI: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
+  RG: 'rg-babco-rnd-sandbox'
+  APP: 'babco-sqlagent-wf-2c606af4'
+  LOGIN_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx'
 
 jobs:
-  recover:
+  temporary-test-login:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[temp-login]')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
-      - uses: azure/login@v2
+      - uses: actions/checkout@v4
+
+      - name: Validate bounded login source
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'StartTemporaryAdminSession' deploy-overrides/App_Code/AuthService.cs
+          grep -q 'StartTestSessionAndContinue' deploy-overrides/Login.aspx.cs
+          grep -q 'Temporary Admin Login' deploy-overrides/Login.aspx
+          ! grep -q 'Sign in with Microsoft Entra ID' deploy-overrides/Login.aspx
+
+      - name: Azure login
+        uses: azure/login@v2
         with:
           client-id: ${{ env.AZURE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Find an existing registration that already accepts the SQL Agent callback
-        shell: bash
-        run: |
-          set +e
-          status="$RUNNER_TEMP/sqlagent-entra-recovery.txt"
-          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$status"
-          echo "CALLBACK_URI=$CALLBACK_URI" >> "$status"
-          selected=0
-          checked=0
-          seen='|'
-
-          apps=$(az webapp list --query '[].{name:name,rg:resourceGroup}' -o tsv --only-show-errors 2>/dev/null)
-          while IFS=$'\t' read -r app rg; do
-            [ -z "$app" ] && continue
-            auth=$(az webapp auth microsoft show -g "$rg" -n "$app" -o json --only-show-errors 2>/dev/null)
-            [ $? -ne 0 ] && continue
-            client=$(printf '%s' "$auth" | jq -r '.registration.clientId // .clientId // empty')
-            secretSetting=$(printf '%s' "$auth" | jq -r '.registration.clientSecretSettingName // .clientSecretSettingName // empty')
-            issuer=$(printf '%s' "$auth" | jq -r '.registration.openIdIssuer // .openIdIssuer // empty')
-            audience=$(printf '%s' "$auth" | jq -r '.validation.allowedAudiences[0] // .allowedAudiences[0] // empty')
-            [ -z "$client" ] && continue
-            case "$seen" in *"|$client|"*) continue;; esac
-            seen="${seen}${client}|"
-            checked=$((checked+1))
-
-            encoded=$(python3 - <<'PY' "$CALLBACK_URI"
-import sys,urllib.parse
-print(urllib.parse.quote(sys.argv[1], safe=''))
-PY
-)
-            authUrl="https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/authorize?client_id=$client&response_type=code&redirect_uri=$encoded&response_mode=query&scope=openid&state=sqlagentcheck&nonce=sqlagentcheck"
-            body="$RUNNER_TEMP/ms-$checked.html"
-            code=$(curl -sS -L --max-redirs 4 --max-time 40 -o "$body" -w '%{http_code}' "$authUrl" || true)
-            if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match' "$body"; then
-              continue
-            fi
-            if ! grep -Eqi 'Microsoft|Sign in|login|Pick an account|Enter password' "$body"; then
-              continue
-            fi
-
-            [ -z "$secretSetting" ] && continue
-            secret=$(az webapp config appsettings list -g "$rg" -n "$app" --query "[?name=='$secretSetting'].value | [0]" -o tsv --only-show-errors 2>/dev/null)
-            [ -z "$secret" ] && continue
-            [ "$secret" = 'null' ] && continue
-            echo "::add-mask::$secret"
-
-            printf '%s' "$client" > "$RUNNER_TEMP/selected-client.txt"
-            printf '%s' "$secretSetting" > "$RUNNER_TEMP/selected-secret-setting.txt"
-            printf '%s' "$issuer" > "$RUNNER_TEMP/selected-issuer.txt"
-            printf '%s' "$audience" > "$RUNNER_TEMP/selected-audience.txt"
-            printf '%s' "$secret" > "$RUNNER_TEMP/selected-secret.txt"
-            printf '%s' "$app" > "$RUNNER_TEMP/selected-source-app.txt"
-            printf '%s' "$rg" > "$RUNNER_TEMP/selected-source-rg.txt"
-            echo "VALID_EXISTING_CLIENT_FOUND=true" >> "$status"
-            echo "SOURCE_APP=$app" >> "$status"
-            echo "SOURCE_RG=$rg" >> "$status"
-            echo "CLIENT_ID=$client" >> "$status"
-            selected=1
-            break
-          done <<< "$apps"
-
-          echo "CANDIDATE_CLIENTS_CHECKED=$checked" >> "$status"
-          if [ $selected -ne 1 ]; then
-            echo 'VALID_EXISTING_CLIENT_FOUND=false' >> "$status"
-            exit 1
-          fi
-
-      - name: Apply only the selected existing Entra provider to SQL Agent
+      - name: Deploy temporary login files only
         shell: bash
         run: |
           set -euo pipefail
-          status="$RUNNER_TEMP/sqlagent-entra-recovery.txt"
-          client=$(cat "$RUNNER_TEMP/selected-client.txt")
-          secretSetting=$(cat "$RUNNER_TEMP/selected-secret-setting.txt")
-          issuer=$(cat "$RUNNER_TEMP/selected-issuer.txt")
-          audience=$(cat "$RUNNER_TEMP/selected-audience.txt")
-          secret=$(cat "$RUNNER_TEMP/selected-secret.txt")
-          echo "::add-mask::$secret"
+          s="$RUNNER_TEMP/temp-login-status.txt"
+          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$s"
+          echo 'DEPLOY_SCOPE=Login.aspx,Login.aspx.cs,App_Code/AuthService.cs,Admin.aspx.cs' >> "$s"
+          echo 'SQL_SETTINGS_WRITTEN=false' >> "$s"
+          echo 'OPENAI_SETTINGS_WRITTEN=false' >> "$s"
 
-          # Auth-only write. Do not touch SQL/OpenAI or source apps.
-          az webapp config appsettings set -g "$TARGET_RG" -n "$TARGET_APP" --settings "$secretSetting=$secret" --only-show-errors >/dev/null
-          args=(az webapp auth microsoft update -g "$TARGET_RG" -n "$TARGET_APP" --client-id "$client" --client-secret-setting-name "$secretSetting" --yes --only-show-errors)
-          [ -n "$issuer" ] && args+=(--issuer "$issuer")
-          [ -n "$audience" ] && args+=(--allowed-audiences "$audience")
-          "${args[@]}" >/dev/null
-          az webapp auth update -g "$TARGET_RG" -n "$TARGET_APP" --enabled true --unauthenticated-client-action AllowAnonymous --require-https true --enable-token-store true --only-show-errors >/dev/null
-          az webapp restart -g "$TARGET_RG" -n "$TARGET_APP" --only-show-errors >/dev/null
-          echo 'TARGET_AUTH_UPDATED=true' >> "$status"
+          deploy_one() {
+            src="$1"; target="$2"
+            for attempt in 1 2 3 4 5 6; do
+              if az webapp deploy -g "$RG" -n "$APP" --src-path "$src" --type static --target-path "$target" --restart false --clean false --only-show-errors >/dev/null 2>"$RUNNER_TEMP/deploy.err"; then
+                echo "FILE_${target//\//_}=true" >> "$s"
+                return 0
+              fi
+              sleep 8
+            done
+            err=$(tr '\n' ' ' < "$RUNNER_TEMP/deploy.err" | sed 's/[[:space:]]\+/ /g' | cut -c1-800)
+            echo "DEPLOY_ERROR=$err" >> "$s"
+            return 1
+          }
 
-      - name: Verify Microsoft accepts the SQL Agent redirect URI and site stays live
+          deploy_one deploy-overrides/App_Code/AuthService.cs App_Code/AuthService.cs
+          deploy_one deploy-overrides/Login.aspx.cs Login.aspx.cs
+          deploy_one deploy-overrides/Login.aspx Login.aspx
+          deploy_one deploy-overrides/Admin.aspx.cs Admin.aspx.cs
+          az webapp restart -g "$RG" -n "$APP" --only-show-errors >/dev/null
+          echo 'SOURCE_DEPLOY=true' >> "$s"
+
+      - name: Verify session login before disabling Easy Auth
         shell: bash
         run: |
-          set +e
-          status="$RUNNER_TEMP/sqlagent-entra-recovery.txt"
-          login=0
-          for i in $(seq 1 36); do
-            login=$(curl -sS -L --max-redirs 3 --max-time 25 -o "$RUNNER_TEMP/login.html" -w '%{http_code}' "https://$TARGET_APP.azurewebsites.net/Login.aspx" || true)
-            [ "$login" = '200' ] && break
-            sleep 5
+          set -euo pipefail
+          s="$RUNNER_TEMP/temp-login-status.txt"
+          code=0
+          for i in $(seq 1 30); do
+            rm -f "$RUNNER_TEMP/cookies" "$RUNNER_TEMP/pre.html"
+            code=$(curl -sS -L -c "$RUNNER_TEMP/cookies" -b "$RUNNER_TEMP/cookies" --max-time 25 -o "$RUNNER_TEMP/pre.html" -w '%{http_code}' "$LOGIN_URL" || true)
+            if [ "$code" = '200' ] && grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/pre.html"; then break; fi
+            sleep 4
           done
-          echo "LOGIN_HTTP=$login" >> "$status"
+          echo "PRE_DISABLE_HTTP=$code" >> "$s"
+          if [ "$code" != '200' ] || ! grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/pre.html"; then exit 1; fi
+          echo 'PRE_DISABLE_LOGIN_FLOW=true' >> "$s"
 
-          authUrl="https://$TARGET_APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx"
-          : > "$RUNNER_TEMP/ah"
-          acode=$(curl -sS --max-time 30 --max-redirs 0 -D "$RUNNER_TEMP/ah" -o /dev/null -w '%{http_code}' "$authUrl" || true)
-          microsoftUrl=$(tr -d '\r' < "$RUNNER_TEMP/ah" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
-          echo "EASY_AUTH_HTTP=$acode" >> "$status"
-          valid=0
-          if [ "$acode" = '302' ] && printf '%s' "$microsoftUrl" | grep -Eqi '^https://login\.microsoftonline\.com/'; then
-            mcode=$(curl -sS -L --max-redirs 4 --max-time 45 -o "$RUNNER_TEMP/microsoft.html" -w '%{http_code}' "$microsoftUrl" || true)
-            echo "MICROSOFT_HTTP=$mcode" >> "$status"
-            if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match' "$RUNNER_TEMP/microsoft.html"; then
-              echo 'AADSTS50011_PRESENT=true' >> "$status"
-            else
-              echo 'AADSTS50011_PRESENT=false' >> "$status"
-              valid=1
-            fi
+      - name: Disable broken Entra Easy Auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          s="$RUNNER_TEMP/temp-login-status.txt"
+          az webapp auth update -g "$RG" -n "$APP" --enabled false --only-show-errors >/dev/null
+          az webapp restart -g "$RG" -n "$APP" --only-show-errors >/dev/null
+          echo 'EASY_AUTH_DISABLED=true' >> "$s"
+
+      - name: Verify final live login
+        shell: bash
+        run: |
+          set -euo pipefail
+          s="$RUNNER_TEMP/temp-login-status.txt"
+          code=0
+          for i in $(seq 1 30); do
+            rm -f "$RUNNER_TEMP/cookies" "$RUNNER_TEMP/final.html"
+            code=$(curl -sS -L -c "$RUNNER_TEMP/cookies" -b "$RUNNER_TEMP/cookies" --max-time 25 -o "$RUNNER_TEMP/final.html" -w '%{http_code}' "$LOGIN_URL" || true)
+            if [ "$code" = '200' ] && grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/final.html"; then break; fi
+            sleep 4
+          done
+          echo "FINAL_HTTP=$code" >> "$s"
+          if [ "$code" != '200' ] || ! grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/final.html"; then
+            echo 'VERIFY=failure' >> "$s"
+            exit 1
           fi
-          if [ "$login" = '200' ] && [ $valid -eq 1 ]; then echo 'VERIFY=success' >> "$status"; else echo 'VERIFY=failure' >> "$status"; fi
-          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$status"
-          [ "$login" = '200' ] && [ $valid -eq 1 ]
+          echo 'TEMP_ADMIN_LOGIN=true' >> "$s"
+          echo 'VERIFY=success' >> "$s"
+          echo "LIVE_URL=$LOGIN_URL" >> "$s"
 
-      - name: Publish safe recovery status
+      - name: Publish login recovery status
         if: always()
         shell: bash
         env:
@@ -162,14 +127,15 @@ PY
         run: |
           set -e
           d="$RUNNER_TEMP/pub"; mkdir -p "$d"
-          p="$RUNNER_TEMP/sqlagent-entra-recovery.txt"
+          p="$RUNNER_TEMP/temp-login-status.txt"
           if [ -f "$p" ]; then cp "$p" "$d/status.txt"; else echo 'RUN_FAILED=true' > "$d/status.txt"; fi
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$d/status.txt"
           cd "$d"
           git init -q
-          git checkout -q -b sqlagent-entra-recovery-status
+          git checkout -q -b temporary-test-login-status
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add status.txt
-          git commit -q -m 'Publish SQL Agent Entra recovery status'
+          git commit -q -m 'Publish temporary test login status'
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push --force origin sqlagent-entra-recovery-status >/dev/null
+          git push --force origin temporary-test-login-status >/dev/null
