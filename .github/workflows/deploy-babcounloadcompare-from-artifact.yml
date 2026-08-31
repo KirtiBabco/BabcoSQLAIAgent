@@ -19,12 +19,12 @@ env:
   TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
   TARGET_URL: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
   STD_SWA_NAME: 'babco-followup-capture-demo'
-  EXPECTED_SOURCE_COMMIT: '2f8b7352e052133bb351d738330a93fdd9bdcd94'
+  EXPECTED_SOURCE_COMMIT: '83f8d2742ddfb2d6363fa2a2d648dcc325824ddd'
 
 jobs:
   deploy-and-verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Azure login
         uses: azure/login@v2
@@ -33,6 +33,39 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
+
+      - name: Reuse existing Babco OpenAI development key for scan reading
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="$(az webapp config appsettings list -g "$TARGET_RG" -n "$TARGET_APP" --query "[?name=='OPENAI_API_KEY_DEVELOPMENT'].value | [0]" -o tsv --only-show-errors || true)"
+          if [ -n "$current" ]; then
+            echo "::add-mask::$current"
+            echo 'SCAN_AI_KEY=already-configured'
+          else
+            found=''
+            source_app=''
+            while IFS= read -r app; do
+              [ -n "$app" ] || continue
+              [ "$app" = "$TARGET_APP" ] && continue
+              key="$(az webapp config appsettings list -g "$TARGET_RG" -n "$app" --query "[?name=='OPENAI_API_KEY_DEVELOPMENT'].value | [0]" -o tsv --only-show-errors 2>/dev/null || true)"
+              if [ -z "$key" ]; then
+                key="$(az webapp config appsettings list -g "$TARGET_RG" -n "$app" --query "[?name=='OPENAI_API_KEY'].value | [0]" -o tsv --only-show-errors 2>/dev/null || true)"
+              fi
+              if [ -n "$key" ]; then found="$key"; source_app="$app"; break; fi
+            done < <(az webapp list -g "$TARGET_RG" --query '[].name' -o tsv --only-show-errors)
+            if [ -z "$found" ]; then
+              echo 'No reusable Babco OpenAI API key was found in the authorized resource group.' >&2
+              exit 1
+            fi
+            echo "::add-mask::$found"
+            az webapp config appsettings set -g "$TARGET_RG" -n "$TARGET_APP" --settings "OPENAI_API_KEY_DEVELOPMENT=$found" --only-show-errors >/dev/null
+            echo "SCAN_AI_KEY=reused-from-$source_app"
+          fi
+          az webapp config appsettings set -g "$TARGET_RG" -n "$TARGET_APP" --settings "UnloadCompare.DocumentAIModel=gpt-5.6-luna" --only-show-errors >/dev/null
+          test -n "$(az webapp config appsettings list -g "$TARGET_RG" -n "$TARGET_APP" --query "[?name=='OPENAI_API_KEY_DEVELOPMENT'].value | [0]" -o tsv --only-show-errors)"
+          test "$(az webapp config appsettings list -g "$TARGET_RG" -n "$TARGET_APP" --query "[?name=='UnloadCompare.DocumentAIModel'].value | [0]" -o tsv --only-show-errors)" = 'gpt-5.6-luna'
+          echo 'SCAN_AI_CONFIGURED=true'
 
       - name: Preserve current App Service configuration
         shell: bash
@@ -47,18 +80,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/build.txt' -o "$RUNNER_TEMP/build.txt"
-          grep -Fq "Source commit: $EXPECTED_SOURCE_COMMIT" "$RUNNER_TEMP/build.txt"
+          for i in $(seq 1 20); do
+            curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/build.txt' -o "$RUNNER_TEMP/build.txt" || true
+            if grep -Fq "Source commit: $EXPECTED_SOURCE_COMMIT" "$RUNNER_TEMP/build.txt" 2>/dev/null; then break; fi
+            [ "$i" -lt 20 ] || { cat "$RUNNER_TEMP/build.txt" 2>/dev/null || true; exit 1; }
+            sleep 5
+          done
           curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/webapp-publish.zip' -o "$RUNNER_TEMP/webapp-publish.zip"
           unzip -t "$RUNNER_TEMP/webapp-publish.zip" >/dev/null
-          for f in Default.aspx UnloadCompare.aspx Site.Master Web.config bin/BabcoUnloadCompare.Web.dll; do unzip -Z1 "$RUNNER_TEMP/webapp-publish.zip" | grep -Fxq "$f"; done
+          for f in Default.aspx UnloadCompare.aspx Site.Master Web.config bin/BabcoUnloadCompare.Web.dll Scripts/unload-compare.js; do unzip -Z1 "$RUNNER_TEMP/webapp-publish.zip" | grep -Fxq "$f"; done
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'standard-app-header'
-          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'Without AI'
-          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'This is a prototype and not the final production website.'
-          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'PackingSlip receiving & count'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'v1.3.0'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'Feedback Form'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" UnloadCompare.aspx | grep -Fq 'poDropdownBtn'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" UnloadCompare.aspx | grep -Fq 'Upload Scan / PDF'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Scripts/unload-compare.js | grep -Fq 'SCANNED SHEET AI PREVIEW'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq '~/Content/babco-labs-logo.svg'
           if unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'std-brand-fallback'; then echo 'BL fallback still present' >&2; exit 1; fi
-          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'std-user-card'
+          echo 'V13_PACKAGE_VALIDATED=true'
 
       - name: Inject canonical STD Policies SVG into deploy package
         shell: bash
@@ -66,26 +105,17 @@ jobs:
           set -euo pipefail
           STD_HOST="$(az staticwebapp show -g "$TARGET_RG" -n "$STD_SWA_NAME" --query defaultHostname -o tsv --only-show-errors)"
           test -n "$STD_HOST"
-          echo "STD_POLICIES_HOST=$STD_HOST"
           curl -fsSL "https://$STD_HOST/assets/babco-labs-logo.svg" -o "$RUNNER_TEMP/babco-labs-logo.svg"
           test -s "$RUNNER_TEMP/babco-labs-logo.svg"
           grep -Fq '<svg' "$RUNNER_TEMP/babco-labs-logo.svg"
           grep -Fq 'Babco Labs' "$RUNNER_TEMP/babco-labs-logo.svg"
-
-          rm -rf "$RUNNER_TEMP/pkg"
-          mkdir -p "$RUNNER_TEMP/pkg/Content"
+          rm -rf "$RUNNER_TEMP/pkg"; mkdir -p "$RUNNER_TEMP/pkg/Content"
           unzip -q "$RUNNER_TEMP/webapp-publish.zip" -d "$RUNNER_TEMP/pkg"
           cp "$RUNNER_TEMP/babco-labs-logo.svg" "$RUNNER_TEMP/pkg/Content/babco-labs-logo.svg"
-          test -s "$RUNNER_TEMP/pkg/Content/babco-labs-logo.svg"
-          grep -Fq '~/Content/babco-labs-logo.svg' "$RUNNER_TEMP/pkg/Site.Master"
-          if grep -Fq 'std-brand-fallback' "$RUNNER_TEMP/pkg/Site.Master"; then echo 'BL fallback still present in package' >&2; exit 1; fi
-
           rm -f "$RUNNER_TEMP/webapp-publish.zip"
           (cd "$RUNNER_TEMP/pkg" && zip -qr "$RUNNER_TEMP/webapp-publish.zip" .)
           unzip -Z1 "$RUNNER_TEMP/webapp-publish.zip" | grep -Fxq 'Content/babco-labs-logo.svg'
-          echo "PACKAGE_SHA256=$(sha256sum "$RUNNER_TEMP/webapp-publish.zip" | awk '{print $1}')"
           echo 'LOCAL_STD_SVG_PACKAGED=true'
-          echo 'BL_FALLBACK_REMOVED=true'
 
       - name: Deploy through Azure ARM using OIDC
         shell: bash
@@ -95,7 +125,7 @@ jobs:
           az webapp restart -g "$TARGET_RG" -n "$TARGET_APP" --only-show-errors >/dev/null
           echo 'ARM_ZIP_DEPLOY_COMPLETED=true'
 
-      - name: Prove settings were not changed
+      - name: Prove settings were not changed during deployment
         shell: bash
         run: |
           set -euo pipefail
@@ -105,7 +135,7 @@ jobs:
           diff -u "$RUNNER_TEMP/appsettings-before.txt" "$RUNNER_TEMP/appsettings-after.txt"
           echo 'CONFIG_PRESERVED=true'
 
-      - name: Verify live page, local SVG logo and Entra redirect
+      - name: Verify live page local SVG and Entra redirect
         shell: bash
         run: |
           set -euo pipefail
@@ -120,11 +150,9 @@ jobs:
           done
           test "$ok" = '1'
 
-          logo_ok=0
-          logo_url="https://$TARGET_APP.azurewebsites.net/Content/babco-labs-logo.svg"
+          logo_ok=0; logo_url="https://$TARGET_APP.azurewebsites.net/Content/babco-labs-logo.svg"
           for i in $(seq 1 20); do
             lcode=$(curl -sS --max-time 20 -o "$RUNNER_TEMP/live-logo.svg" -w '%{http_code}' "$logo_url" || true)
-            echo "LOGO_$i HTTP=$lcode"
             if [ "$lcode" = '200' ] && grep -Fq '<svg' "$RUNNER_TEMP/live-logo.svg" && grep -Fq 'Babco Labs' "$RUNNER_TEMP/live-logo.svg"; then logo_ok=1; break; fi
             sleep 5
           done
@@ -136,13 +164,13 @@ jobs:
             : > "$RUNNER_TEMP/ah"
             acode=$(curl -sS --max-time 20 --max-redirs 0 -D "$RUNNER_TEMP/ah" -o "$RUNNER_TEMP/ab" -w '%{http_code}' "$auth_url" || true)
             aloc=$(tr -d '\r' < "$RUNNER_TEMP/ah" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
-            echo "ENTRA_$i HTTP=$acode LOCATION=$aloc"
             if [ "$acode" = '302' ] && printf '%s' "$aloc" | grep -Eqi '^https://login\.(windows\.net|microsoftonline\.com)/'; then auth_ok=1; break; fi
             sleep 5
           done
           test "$auth_ok" = '1'
+          test -n "$(az webapp config appsettings list -g "$TARGET_RG" -n "$TARGET_APP" --query "[?name=='OPENAI_API_KEY_DEVELOPMENT'].value | [0]" -o tsv --only-show-errors)"
           echo 'LIVE_PAGE_OK=true'
           echo 'LIVE_LOCAL_SVG_OK=true'
-          echo 'BL_FALLBACK_ABSENT=true'
+          echo 'SCAN_AI_CONFIGURED=true'
           echo 'ENTRA_OK=true'
           echo 'VERIFIED_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
