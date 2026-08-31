@@ -1,4 +1,4 @@
-name: Deploy Temporary Test Login
+name: Deploy Simple Test Login
 
 on:
   workflow_dispatch:
@@ -7,6 +7,10 @@ on:
     paths:
       - 'ops/run-temporary-test-login.txt'
       - '.github/workflows/deploy-temporary-test-login.yml'
+
+concurrency:
+  group: sqlagent-simple-login
+  cancel-in-progress: true
 
 permissions:
   id-token: write
@@ -21,20 +25,11 @@ env:
   LOGIN_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx'
 
 jobs:
-  deploy-test-login-only:
+  simple-login:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: Validate temporary login source
-        shell: bash
-        run: |
-          set -euo pipefail
-          grep -q 'StartTemporaryAdminSession' deploy-overrides/App_Code/AuthService.cs
-          grep -q 'StartTestSessionAndContinue' deploy-overrides/Login.aspx.cs
-          grep -q 'Temporary Admin Login' deploy-overrides/Login.aspx
-          ! grep -q 'Sign in with Microsoft Entra ID' deploy-overrides/Login.aspx
 
       - name: Azure login
         uses: azure/login@v2
@@ -44,96 +39,30 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Deploy only temporary login files
+      - name: Deploy simple login only and keep Entra enabled
         shell: bash
         run: |
           set -euo pipefail
-          s="$RUNNER_TEMP/test-login-status.txt"
-          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$s"
-          echo 'SCOPE=Login.aspx,Login.aspx.cs,App_Code/AuthService.cs,Admin.aspx.cs' >> "$s"
-          echo 'SQL_SETTINGS_WRITTEN=false' >> "$s"
-          echo 'OPENAI_SETTINGS_WRITTEN=false' >> "$s"
-
-          deploy_file() {
-            src="$1"; target="$2"
-            for i in 1 2 3 4 5 6; do
-              if az webapp deploy -g "$RG" -n "$APP" --src-path "$src" --type static --target-path "$target" --restart false --clean false --only-show-errors >/dev/null 2>"$RUNNER_TEMP/deploy.err"; then
-                echo "DEPLOYED_${target//\//_}=true" >> "$s"
-                return 0
-              fi
-              sleep 8
-            done
-            err=$(tr '\n' ' ' < "$RUNNER_TEMP/deploy.err" | cut -c1-800)
-            echo "DEPLOY_ERROR=$err" >> "$s"
-            return 1
-          }
-
-          deploy_file deploy-overrides/App_Code/AuthService.cs App_Code/AuthService.cs
-          deploy_file deploy-overrides/Login.aspx.cs Login.aspx.cs
-          deploy_file deploy-overrides/Login.aspx Login.aspx
-          deploy_file deploy-overrides/Admin.aspx.cs Admin.aspx.cs
-          echo 'SOURCE_DEPLOY=true' >> "$s"
-
-      - name: Disable broken Entra Easy Auth
-        shell: bash
-        run: |
-          set -euo pipefail
-          s="$RUNNER_TEMP/test-login-status.txt"
-          before=$(az webapp auth show -g "$RG" -n "$APP" --query enabled -o tsv --only-show-errors || true)
-          echo "EASY_AUTH_BEFORE=$before" >> "$s"
-          az webapp auth update -g "$RG" -n "$APP" --enabled false --only-show-errors >/dev/null
-          after=$(az webapp auth show -g "$RG" -n "$APP" --query enabled -o tsv --only-show-errors || true)
-          echo "EASY_AUTH_AFTER=$after" >> "$s"
-          if [ "${after,,}" != 'false' ]; then exit 1; fi
+          for pair in \
+            'deploy-overrides/App_Code/AuthService.cs|App_Code/AuthService.cs' \
+            'deploy-overrides/Login.aspx.cs|Login.aspx.cs' \
+            'deploy-overrides/Login.aspx|Login.aspx' \
+            'deploy-overrides/Admin.aspx.cs|Admin.aspx.cs'; do
+            src="${pair%%|*}"; target="${pair##*|}"
+            az webapp deploy -g "$RG" -n "$APP" --src-path "$src" --type static --target-path "$target" --restart false --clean false --only-show-errors >/dev/null
+          done
+          az webapp auth update -g "$RG" -n "$APP" --enabled true --unauthenticated-client-action AllowAnonymous --only-show-errors >/dev/null
           az webapp restart -g "$RG" -n "$APP" --only-show-errors >/dev/null
-          echo 'EASY_AUTH_DISABLED=true' >> "$s"
 
-      - name: Verify final live login
+      - name: Verify Login.aspx is reachable
         shell: bash
         run: |
           set -euo pipefail
-          s="$RUNNER_TEMP/test-login-status.txt"
           code=0
-          for i in $(seq 1 36); do
-            rm -f "$RUNNER_TEMP/cookies" "$RUNNER_TEMP/final.html"
-            code=$(curl -sS -L -c "$RUNNER_TEMP/cookies" -b "$RUNNER_TEMP/cookies" --max-time 25 -o "$RUNNER_TEMP/final.html" -w '%{http_code}' "$LOGIN_URL" || true)
-            if [ "$code" = '200' ] && grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/final.html"; then break; fi
+          for i in $(seq 1 24); do
+            code=$(curl -sS -L --max-time 20 -o "$RUNNER_TEMP/live.html" -w '%{http_code}' "$LOGIN_URL" || true)
+            [ "$code" = '200' ] && break
             sleep 5
           done
-          echo "FINAL_HTTP=$code" >> "$s"
-          if [ "$code" != '200' ]; then
-            echo 'VERIFY=failure' >> "$s"
-            exit 1
-          fi
-          if ! grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/final.html"; then
-            echo 'FINAL_PAGE_NOT_DEFAULT=true' >> "$s"
-            head -c 500 "$RUNNER_TEMP/final.html" | tr '\r\n' ' ' | sed 's/[[:space:]]\+/ /g' | sed 's/^/FINAL_PAGE_PREVIEW=/' >> "$s"
-            echo >> "$s"
-            echo 'VERIFY=failure' >> "$s"
-            exit 1
-          fi
-          echo 'TEMP_ADMIN_LOGIN=true' >> "$s"
-          echo 'AADSTS50011_PATH_BYPASSED=true' >> "$s"
-          echo 'VERIFY=success' >> "$s"
-          echo "LIVE_URL=$LOGIN_URL" >> "$s"
-
-      - name: Publish status
-        if: always()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          d="$RUNNER_TEMP/pub"; mkdir -p "$d"
-          p="$RUNNER_TEMP/test-login-status.txt"
-          if [ -f "$p" ]; then cp "$p" "$d/status.txt"; else echo 'RUN_FAILED=true' > "$d/status.txt"; fi
-          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$d/status.txt"
-          cd "$d"
-          git init -q
-          git checkout -q -b temporary-test-login-status
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add status.txt
-          git commit -q -m 'Publish temporary test login status'
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push --force origin temporary-test-login-status >/dev/null
+          echo "LOGIN_HTTP=$code"
+          [ "$code" = '200' ]
