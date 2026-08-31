@@ -35,7 +35,7 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Deploy only Admin Costing files
+      - name: Deploy Admin Costing through Kudu command API only
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -47,43 +47,15 @@ jobs:
           Add-Content $status 'APP_SETTINGS_WRITTEN=false'
           Add-Content $status 'AUTH_SETTINGS_WRITTEN=false'
 
-          function HashText([string]$text) {
+          function HashText([string]$text){
             if($null -eq $text){$text=''}
             $sha=[Security.Cryptography.SHA256]::Create()
             try{return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','').ToLowerInvariant()}
             finally{$sha.Dispose()}
           }
-
-          $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
-          $p=@($profiles | Where-Object {$_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy'} | Select-Object -First 1)
-          if($p.Count -eq 0){throw 'Publishing profile unavailable.'}
-          $u=[string]$p[0].userName
-          $pw=[string]$p[0].userPWD
-          Write-Output "::add-mask::$u"
-          Write-Output "::add-mask::$pw"
-          $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
-          $headers=@{Authorization="Basic $basic"}
-          $putHeaders=@{Authorization="Basic $basic";'If-Match'='*'}
-          $scm="https://$env:WEB_APP.scm.azurewebsites.net/api/vfs/site/wwwroot"
-
-          function GetLiveText([string]$relativePath){
-            $uri="$scm/$($relativePath.Replace('\\','/'))"
-            try{return [string](Invoke-WebRequest -Method Get -Uri $uri -Headers $headers -UseBasicParsing -TimeoutSec 60).Content}
-            catch{if($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404){return $null};throw}
+          function CanonicalAppSettings(){
+            return (az webapp config appsettings list -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json | Sort-Object name | ConvertTo-Json -Depth 20 -Compress)
           }
-
-          function PutLiveFile([string]$relativePath,[string]$localPath){
-            if(-not(Test-Path $localPath)){throw "Local deploy file missing: $localPath"}
-            $uri="$scm/$($relativePath.Replace('\\','/'))"
-            $r=Invoke-WebRequest -Method Put -Uri $uri -Headers $putHeaders -InFile $localPath -ContentType 'application/octet-stream' -UseBasicParsing -TimeoutSec 120
-            if([int]$r.StatusCode -lt 200 -or [int]$r.StatusCode -ge 300){throw "Kudu VFS PUT failed for ${relativePath}: HTTP $([int]$r.StatusCode)"}
-          }
-
-          $protected=@('Login.aspx','Login.aspx.cs','AuthComplete.aspx','AuthComplete.aspx.cs','App_Code\\AuthService.cs','App_Code\\AppConfig.cs','Web.config')
-          $before=@{}
-          foreach($path in $protected){$before[$path]=HashText (GetLiveText $path)}
-          $settingsBefore=az webapp config appsettings list -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json
-          $settingsHashBefore=HashText $settingsBefore
 
           $adminPath=Join-Path $env:GITHUB_WORKSPACE 'deploy-overrides\Admin.aspx'
           $adminCsPath=Join-Path $env:GITHUB_WORKSPACE 'deploy-overrides\Admin.aspx.cs'
@@ -98,46 +70,84 @@ jobs:
           Add-Content $status 'ADMIN_AUTHSERVICE_DEPENDENCY=false'
           Add-Content $status 'ADMIN_EASYAUTH_HEADERS=true'
 
-          PutLiveFile 'Admin.aspx' $adminPath
-          PutLiveFile 'Admin.aspx.cs' $adminCsPath
+          $settingsHashBefore=HashText (CanonicalAppSettings)
 
-          $defaultBefore=GetLiveText 'Default.aspx'
-          if($null -eq $defaultBefore){throw 'Live Default.aspx missing.'}
-          $defaultAfter=$defaultBefore
-          if(-not $defaultAfter.Contains('Costing / Admin')){
+          $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
+          $p=@($profiles | Where-Object {$_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy'} | Select-Object -First 1)
+          if($p.Count -eq 0){throw 'Publishing profile unavailable.'}
+          $u=[string]$p[0].userName
+          $pw=[string]$p[0].userPWD
+          Write-Output "::add-mask::$u"
+          Write-Output "::add-mask::$pw"
+          $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
+          $headers=@{Authorization="Basic $basic"}
+
+          $adminB64=[Convert]::ToBase64String([IO.File]::ReadAllBytes($adminPath))
+          $adminCsB64=[Convert]::ToBase64String([IO.File]::ReadAllBytes($adminCsPath))
+
+          $remote=@'
+          $ErrorActionPreference='Stop'
+          $root='D:\home\site\wwwroot'
+          if(-not(Test-Path $root)){$root='C:\home\site\wwwroot'}
+          if(-not(Test-Path $root)){throw 'Live wwwroot not found.'}
+
+          function FileHashOrMissing([string]$p){if(Test-Path $p){return (Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant()};return 'missing'}
+          $protected=@('Login.aspx','Login.aspx.cs','AuthComplete.aspx','AuthComplete.aspx.cs','App_Code\AuthService.cs','App_Code\AppConfig.cs','Web.config')
+          $before=@{}
+          foreach($rel in $protected){$before[$rel]=FileHashOrMissing (Join-Path $root $rel)}
+
+          $defaultPath=Join-Path $root 'Default.aspx'
+          if(-not(Test-Path $defaultPath)){throw 'Live Default.aspx missing.'}
+          $default=Get-Content $defaultPath -Raw
+          $patched=$default
+          $patchType='already-present'
+          if(-not $patched.Contains('Costing / Admin')){
             $old='    <div class="status">&#9679; AI Agent Ready</div>'
             $new='    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end"><a href="Admin.aspx" style="display:inline-block;padding:8px 11px;border-radius:18px;border:1px solid #fde68a;background:#fef3c7;color:#92400e;text-decoration:none;font-size:12px;font-weight:600">Costing / Admin</a><div class="status">&#9679; AI Agent Ready</div></div>'
-            if($defaultAfter.Contains($old)){
-              $defaultAfter=$defaultAfter.Replace($old,$new)
-              Add-Content $status 'DEFAULT_LINK_PATCH=base-status-marker'
-            }elseif($defaultAfter.Contains('<span class="status">')){
-              $link='<a class="navbtn adminlink" href="Admin.aspx">Costing / Admin</a>'
-              $defaultAfter=$defaultAfter.Replace('<span class="status">',$link+'<span class="status">')
-              Add-Content $status 'DEFAULT_LINK_PATCH=span-status-marker'
-            }else{throw 'Unknown Default.aspx layout; refusing broad replacement.'}
-            $tmp=Join-Path $env:RUNNER_TEMP 'Default.aspx'
-            [IO.File]::WriteAllText($tmp,$defaultAfter,(New-Object Text.UTF8Encoding($false)))
-            PutLiveFile 'Default.aspx' $tmp
-          }else{Add-Content $status 'DEFAULT_LINK_PATCH=already-present'}
-
-          Start-Sleep -Seconds 6
-          $unchanged=$true
-          foreach($path in $protected){
-            $afterHash=HashText (GetLiveText $path)
-            if($before[$path] -ne $afterHash){$unchanged=$false;Add-Content $status ("PROTECTED_CHANGED="+$path)}
+            if($patched.Contains($old)){$patched=$patched.Replace($old,$new);$patchType='base-status-marker'}
+            elseif($patched.Contains('<span class="status">')){$patched=$patched.Replace('<span class="status">','<a class="navbtn adminlink" href="Admin.aspx">Costing / Admin</a><span class="status">');$patchType='span-status-marker'}
+            else{throw 'Unknown Default.aspx layout; refusing broad replacement.'}
           }
-          Add-Content $status ("PROTECTED_FILES_UNCHANGED="+$unchanged.ToString().ToLowerInvariant())
-          $settingsAfter=az webapp config appsettings list -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json
-          Add-Content $status ("APPSETTINGS_UNCHANGED="+((HashText $settingsAfter) -eq $settingsHashBefore).ToString().ToLowerInvariant())
 
-          $liveAdmin=GetLiveText 'Admin.aspx'
-          $liveAdminCs=GetLiveText 'Admin.aspx.cs'
-          $liveDefault=GetLiveText 'Default.aspx'
-          Add-Content $status ("ADMIN_FILE="+($null -ne $liveAdmin -and $liveAdmin.Contains('Admin Console')).ToString().ToLowerInvariant())
-          Add-Content $status ("ADMIN_COSTING="+($null -ne $liveAdmin -and $liveAdmin.Contains('Costing')).ToString().ToLowerInvariant())
-          Add-Content $status ("ADMIN_CODEBEHIND="+($null -ne $liveAdminCs).ToString().ToLowerInvariant())
-          Add-Content $status ("ADMIN_AUTHSERVICE_LIVE="+($null -ne $liveAdminCs -and $liveAdminCs.Contains('AuthService')).ToString().ToLowerInvariant())
-          Add-Content $status ("DEFAULT_ADMIN_LINK="+($null -ne $liveDefault -and $liveDefault.Contains('Costing / Admin')).ToString().ToLowerInvariant())
+          $adminPath=Join-Path $root 'Admin.aspx'
+          $adminCsPath=Join-Path $root 'Admin.aspx.cs'
+          [IO.File]::WriteAllBytes($adminPath,[Convert]::FromBase64String('__ADMIN_B64__'))
+          [IO.File]::WriteAllBytes($adminCsPath,[Convert]::FromBase64String('__ADMINCS_B64__'))
+          if($patched -ne $default){[IO.File]::WriteAllText($defaultPath,$patched,(New-Object Text.UTF8Encoding($false)))}
+
+          $unchanged=$true
+          foreach($rel in $protected){
+            $after=FileHashOrMissing (Join-Path $root $rel)
+            if($before[$rel] -ne $after){$unchanged=$false;Write-Output ('PROTECTED_CHANGED='+$rel)}
+          }
+          Write-Output ('PROTECTED_FILES_UNCHANGED='+$unchanged.ToString().ToLowerInvariant())
+          Write-Output ('DEFAULT_LINK_PATCH='+$patchType)
+
+          $liveAdmin=Get-Content $adminPath -Raw
+          $liveAdminCs=Get-Content $adminCsPath -Raw
+          $liveDefault=Get-Content $defaultPath -Raw
+          Write-Output ('ADMIN_FILE='+$liveAdmin.Contains('Admin Console').ToString().ToLowerInvariant())
+          Write-Output ('ADMIN_COSTING='+$liveAdmin.Contains('Costing').ToString().ToLowerInvariant())
+          Write-Output ('ADMIN_CODEBEHIND='+(Test-Path $adminCsPath).ToString().ToLowerInvariant())
+          Write-Output ('ADMIN_AUTHSERVICE_LIVE='+$liveAdminCs.Contains('AuthService').ToString().ToLowerInvariant())
+          Write-Output ('DEFAULT_ADMIN_LINK='+$liveDefault.Contains('Costing / Admin').ToString().ToLowerInvariant())
+          '@
+          $remote=$remote.Replace('__ADMIN_B64__',$adminB64).Replace('__ADMINCS_B64__',$adminCsB64)
+          $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remote))
+          $body=@{command="powershell -NoProfile -NonInteractive -EncodedCommand $enc";dir='site\wwwroot'} | ConvertTo-Json -Compress
+          $rr=Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 180
+          if(-not [string]::IsNullOrWhiteSpace([string]$rr.Error)){throw ('Kudu command error: '+[string]$rr.Error)}
+          $markers=@([string]$rr.Output -split "`r?`n" | Where-Object {$_ -match '^(PROTECTED_|DEFAULT_|ADMIN_)'})
+          $markers | Add-Content $status
+          if(-not($markers -contains 'PROTECTED_FILES_UNCHANGED=true')){throw 'Protected live files changed or verification failed.'}
+          if(-not($markers -contains 'ADMIN_FILE=true')){throw 'Admin.aspx verification failed.'}
+          if(-not($markers -contains 'ADMIN_CODEBEHIND=true')){throw 'Admin.aspx.cs verification failed.'}
+          if(-not($markers -contains 'ADMIN_AUTHSERVICE_LIVE=false')){throw 'Admin code unexpectedly depends on AuthService.'}
+          if(-not($markers -contains 'DEFAULT_ADMIN_LINK=true')){throw 'Default Admin link verification failed.'}
+
+          $settingsHashAfter=HashText (CanonicalAppSettings)
+          Add-Content $status ("APPSETTINGS_UNCHANGED="+($settingsHashBefore -eq $settingsHashAfter).ToString().ToLowerInvariant())
+          if($settingsHashBefore -ne $settingsHashAfter){throw 'App settings changed unexpectedly.'}
           Add-Content $status 'DEPLOY=success'
 
       - name: Verify Login and Easy Auth
