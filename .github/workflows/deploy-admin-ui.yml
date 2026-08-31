@@ -61,6 +61,7 @@ jobs:
           Add-Content $status 'PACKAGE_ADMIN_VALID=true'
           Add-Content $status 'ADMIN_AUTHSERVICE_DEPENDENCY=false'
           Add-Content $status 'ADMIN_EASYAUTH_HEADERS=true'
+          Add-Content $status 'FTP_POLICY_API=2025-03-01'
 
           function HashText([string]$text){
             if($null -eq $text){$text=''}
@@ -71,15 +72,22 @@ jobs:
           function CanonicalAppSettings(){
             return (az webapp config appsettings list -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json | Sort-Object name | ConvertTo-Json -Depth 20 -Compress)
           }
+
+          $script:policyCollectionUrl="https://management.azure.com/subscriptions/$env:AZURE_SUBSCRIPTION_ID/resourceGroups/$env:RESOURCE_GROUP/providers/Microsoft.Web/sites/$env:WEB_APP/basicPublishingCredentialsPolicies?api-version=2025-03-01"
+          $script:policyItemUrl="https://management.azure.com/subscriptions/$env:AZURE_SUBSCRIPTION_ID/resourceGroups/$env:RESOURCE_GROUP/providers/Microsoft.Web/sites/$env:WEB_APP/basicPublishingCredentialsPolicies/ftp?api-version=2025-03-01"
+
           function GetFtpPolicy(){
-            $v=az resource show -g $env:RESOURCE_GROUP --name "$env:WEB_APP/ftp" --resource-type 'Microsoft.Web/sites/basicPublishingCredentialsPolicies' --api-version '2022-03-01' --query properties.allow -o tsv
-            if($LASTEXITCODE -ne 0){throw 'Unable to read FTP Basic Publishing Credentials policy.'}
-            return ([string]$v).Trim().ToLowerInvariant()
+            $raw=az rest --method get --url $script:policyCollectionUrl -o json
+            if($LASTEXITCODE -ne 0){throw 'Unable to list Basic Publishing Credentials policies through ARM REST.'}
+            $obj=$raw | ConvertFrom-Json
+            $ftp=@($obj.value | Where-Object {(([string]$_.name -split '/')[-1]) -ieq 'ftp'} | Select-Object -First 1)
+            if($ftp.Count -eq 0){throw 'FTP Basic Publishing Credentials policy was not returned by ARM.'}
+            return ([bool]$ftp[0].properties.allow).ToString().ToLowerInvariant()
           }
           function SetFtpPolicy([bool]$allow){
-            $value=if($allow){'true'}else{'false'}
-            az resource update -g $env:RESOURCE_GROUP --name "$env:WEB_APP/ftp" --resource-type 'Microsoft.Web/sites/basicPublishingCredentialsPolicies' --api-version '2022-03-01' --set "properties.allow=$value" -o none
-            if($LASTEXITCODE -ne 0){throw "Unable to set FTP Basic Publishing Credentials policy to $value."}
+            $body=@{properties=@{allow=$allow}} | ConvertTo-Json -Compress
+            az rest --method put --url $script:policyItemUrl --headers 'Content-Type=application/json' --body $body -o none
+            if($LASTEXITCODE -ne 0){throw "Unable to set FTP Basic Publishing Credentials policy to $allow through ARM REST."}
           }
           function LoadFtpProfile(){
             $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
@@ -93,7 +101,8 @@ jobs:
             if([string]::IsNullOrWhiteSpace($publishUrl)){throw 'FTP publish URL unavailable.'}
             if($publishUrl -notmatch '^[a-zA-Z]+://'){$publishUrl='ftp://'+$publishUrl}
             $ftpUri=[Uri]$publishUrl
-            $script:ftpBase='ftp://'+$ftpUri.Authority+$ftpUri.AbsolutePath.TrimEnd('/')
+            $scheme=if($ftpUri.Scheme -eq 'ftps'){'ftps'}else{'ftp'}
+            $script:ftpBase=$scheme+'://'+$ftpUri.Authority+$ftpUri.AbsolutePath.TrimEnd('/')
           }
           function FtpDownload([string]$relative,[string]$local){
             $url=$script:ftpBase+'/'+($relative.Replace('\\','/'))
@@ -130,10 +139,14 @@ jobs:
               SetFtpPolicy $true
               $temporarilyEnabled=$true
               Add-Content $status 'FTP_BASIC_TEMP_ENABLED=true'
-              Start-Sleep -Seconds 10
+              Start-Sleep -Seconds 12
             }else{
               Add-Content $status 'FTP_BASIC_TEMP_ENABLED=false'
             }
+
+            $effective=GetFtpPolicy
+            Add-Content $status ('FTP_BASIC_DURING='+$effective)
+            if($effective -ne 'true'){throw 'FTP Basic Publishing Credentials policy did not become enabled.'}
 
             LoadFtpProfile
             $probe=Join-Path $tmp 'Login.probe.aspx'
@@ -197,7 +210,7 @@ jobs:
           }
           finally{
             if($temporarilyEnabled){
-              try{SetFtpPolicy $false;Start-Sleep -Seconds 5}catch{Add-Content $status ('FTP_POLICY_RESTORE_ERROR='+$_.Exception.Message);throw}
+              try{SetFtpPolicy $false;Start-Sleep -Seconds 6}catch{Add-Content $status ('FTP_POLICY_RESTORE_ERROR='+$_.Exception.Message);throw}
             }
             $restoredPolicy=GetFtpPolicy
             $policyRestored=($restoredPolicy -eq $originalFtpPolicy)
