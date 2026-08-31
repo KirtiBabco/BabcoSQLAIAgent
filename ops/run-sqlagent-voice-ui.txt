@@ -1,1 +1,1 @@
-Deploy Default.aspx only with browser-managed microphone speech recognition and browser speech synthesis speaker controls. Do not modify Login, Entra, SQL, OpenAI, Admin, or other application files.
+Restore the complete SQL Agent UI from deploy-overrides: full Default page, Admin/Costing page, simple test login/session files, language selector, examples, mic, speaker, clear button, answer card, role display and Admin link. Keep Entra enabled with AllowAnonymous. Do not change SQL or OpenAI settings. Requested 2026-08-31.
