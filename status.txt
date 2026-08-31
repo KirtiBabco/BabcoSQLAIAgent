@@ -1,0 +1,11 @@
+SOURCE_COMMIT=5a20dc0b594ac6cff98729fdd0608189de6fd1bd
+SCOPE=Login.aspx,Login.aspx.cs,App_Code/AuthService.cs,Admin.aspx.cs
+SQL_SETTINGS_WRITTEN=false
+OPENAI_SETTINGS_WRITTEN=false
+DEPLOYED_App_Code_AuthService.cs=true
+DEPLOYED_Login.aspx.cs=true
+DEPLOYED_Login.aspx=true
+DEPLOYED_Admin.aspx.cs=true
+SOURCE_DEPLOY=true
+EASY_AUTH_BEFORE=true
+CHECKED_UTC=2026-08-31T12:22:40Z
