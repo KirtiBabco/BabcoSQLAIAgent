@@ -51,12 +51,6 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Keep Entra enabled and allow simple login page
-        shell: bash
-        run: |
-          set -euo pipefail
-          az webapp auth update -g "$RG" -n "$APP" --enabled true --unauthenticated-client-action AllowAnonymous --only-show-errors >/dev/null
-
       - name: Restore complete UI files only
         shell: bash
         run: |
