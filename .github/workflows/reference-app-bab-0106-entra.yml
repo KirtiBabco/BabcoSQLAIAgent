@@ -37,11 +37,21 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/status.txt"
           : > "$out"
+          ref=''
+          ref_sub=''
 
-          ref=$(az webapp list -o json --only-show-errors | jq -c '[.[] | select((.name|ascii_downcase)=="app-bab-0106")][0] // empty')
-          if [ -z "$ref" ]; then
-            ref=$(az resource list -o json --only-show-errors | jq -c '[.[] | select((.name|ascii_downcase)=="app-bab-0106")][0] // empty')
-          fi
+          mapfile -t subs < <(az account list --query '[?state==`Enabled`].id' -o tsv --only-show-errors)
+          echo "ACCESSIBLE_SUBSCRIPTION_COUNT=${#subs[@]}" >> "$out"
+          for sub in "${subs[@]}"; do
+            az account set --subscription "$sub"
+            candidate=$(az resource list -o json --only-show-errors | jq -c '[.[] | select((.name|ascii_downcase)=="app-bab-0106")][0] // empty')
+            if [ -n "$candidate" ]; then
+              ref="$candidate"
+              ref_sub="$sub"
+              break
+            fi
+          done
+
           if [ -z "$ref" ]; then
             echo 'REFERENCE_FOUND=false' >> "$out"
             echo 'VERIFY=failure' >> "$out"
@@ -53,6 +63,7 @@ jobs:
           ref_type=$(printf '%s' "$ref" | jq -r '.type')
           echo "REFERENCE_FOUND=true" >> "$out"
           echo "REFERENCE_NAME=$ref_name" >> "$out"
+          echo "REFERENCE_SUBSCRIPTION=$ref_sub" >> "$out"
           echo "REFERENCE_RG=$ref_rg" >> "$out"
           echo "REFERENCE_TYPE=$ref_type" >> "$out"
 
@@ -63,9 +74,12 @@ jobs:
           fi
           echo 'REFERENCE_IS_WEBAPP=true' >> "$out"
 
+          az account set --subscription "$ref_sub"
           ra=$(az webapp auth show -g "$ref_rg" -n "$ref_name" -o json --only-show-errors)
-          ta=$(az webapp auth show -g "$TARGET_RG" -n "$TARGET_APP" -o json --only-show-errors)
           rm=$(az webapp auth microsoft show -g "$ref_rg" -n "$ref_name" -o json --only-show-errors)
+
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          ta=$(az webapp auth show -g "$TARGET_RG" -n "$TARGET_APP" -o json --only-show-errors)
           tm=$(az webapp auth microsoft show -g "$TARGET_RG" -n "$TARGET_APP" -o json --only-show-errors)
 
           echo "REF_AUTH_ENABLED=$(printf '%s' "$ra" | jq -r '.enabled // false')" >> "$out"
@@ -77,6 +91,7 @@ jobs:
           echo "REF_SECRET_SETTING=$(printf '%s' "$rm" | jq -r '.registration.clientSecretSettingName // .clientSecretSettingName // empty')" >> "$out"
           echo "REF_ISSUER=$(printf '%s' "$rm" | jq -r '.registration.openIdIssuer // .openIdIssuer // empty')" >> "$out"
           echo "REF_LOGIN_SCOPES=$(printf '%s' "$rm" | jq -r '(.login.loginParameters // []) | join(",")')" >> "$out"
+          echo "REF_ALLOWED_AUDIENCES=$(printf '%s' "$rm" | jq -r '(.validation.allowedAudiences // []) | join(",")')" >> "$out"
 
           echo "TARGET_AUTH_ENABLED=$(printf '%s' "$ta" | jq -r '.enabled // false')" >> "$out"
           echo "TARGET_REQUIRE_AUTH=$(printf '%s' "$ta" | jq -r '.globalValidation.requireAuthentication // false')" >> "$out"
@@ -86,6 +101,8 @@ jobs:
           echo "TARGET_CLIENT_ID=$(printf '%s' "$tm" | jq -r '.registration.clientId // .clientId // empty')" >> "$out"
           echo "TARGET_SECRET_SETTING=$(printf '%s' "$tm" | jq -r '.registration.clientSecretSettingName // .clientSecretSettingName // empty')" >> "$out"
           echo "TARGET_ISSUER=$(printf '%s' "$tm" | jq -r '.registration.openIdIssuer // .openIdIssuer // empty')" >> "$out"
+          echo "TARGET_LOGIN_SCOPES=$(printf '%s' "$tm" | jq -r '(.login.loginParameters // []) | join(",")')" >> "$out"
+          echo "TARGET_ALLOWED_AUDIENCES=$(printf '%s' "$tm" | jq -r '(.validation.allowedAudiences // []) | join(",")')" >> "$out"
           echo 'VERIFY=success' >> "$out"
 
       - name: Publish status
