@@ -1,0 +1,1 @@
+Restore only the previously validated SQL Agent Easy Auth client 0a49493a-7199-490d-9416-59ea6199861f using existing target secret setting MICROSOFT_PROVIDER_AUTHENTICATION_SECRET. Verify Login HTTP 200, Microsoft challenge, and AADSTS50011 absent. Do not touch SQL, OpenAI, application source, or BabcoUnloadCompare. Requested from live AADSTS50011 error on 2026-08-31.
