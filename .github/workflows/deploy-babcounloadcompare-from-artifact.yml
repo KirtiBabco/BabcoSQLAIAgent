@@ -19,12 +19,13 @@ env:
   TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
   TARGET_URL: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
   STD_SWA_NAME: 'babco-followup-capture-demo'
+  SOURCE_AI_APP: 'babco-sqlagent-wf-2c606af4'
   EXPECTED_SOURCE_COMMIT: '83f8d2742ddfb2d6363fa2a2d648dcc325824ddd'
 
 jobs:
   deploy-and-verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - name: Azure login
         uses: azure/login@v2
@@ -43,24 +44,15 @@ jobs:
             echo "::add-mask::$current"
             echo 'SCAN_AI_KEY=already-configured'
           else
-            found=''
-            source_app=''
-            while IFS= read -r app; do
-              [ -n "$app" ] || continue
-              [ "$app" = "$TARGET_APP" ] && continue
-              key="$(az webapp config appsettings list -g "$TARGET_RG" -n "$app" --query "[?name=='OPENAI_API_KEY_DEVELOPMENT'].value | [0]" -o tsv --only-show-errors 2>/dev/null || true)"
-              if [ -z "$key" ]; then
-                key="$(az webapp config appsettings list -g "$TARGET_RG" -n "$app" --query "[?name=='OPENAI_API_KEY'].value | [0]" -o tsv --only-show-errors 2>/dev/null || true)"
-              fi
-              if [ -n "$key" ]; then found="$key"; source_app="$app"; break; fi
-            done < <(az webapp list -g "$TARGET_RG" --query '[].name' -o tsv --only-show-errors)
-            if [ -z "$found" ]; then
-              echo 'No reusable Babco OpenAI API key was found in the authorized resource group.' >&2
-              exit 1
+            az webapp show -g "$TARGET_RG" -n "$SOURCE_AI_APP" --only-show-errors >/dev/null
+            key="$(az webapp config appsettings list -g "$TARGET_RG" -n "$SOURCE_AI_APP" --query "[?name=='OPENAI_API_KEY_DEVELOPMENT'].value | [0]" -o tsv --only-show-errors || true)"
+            if [ -z "$key" ]; then
+              key="$(az webapp config appsettings list -g "$TARGET_RG" -n "$SOURCE_AI_APP" --query "[?name=='OPENAI_API_KEY'].value | [0]" -o tsv --only-show-errors || true)"
             fi
-            echo "::add-mask::$found"
-            az webapp config appsettings set -g "$TARGET_RG" -n "$TARGET_APP" --settings "OPENAI_API_KEY_DEVELOPMENT=$found" --only-show-errors >/dev/null
-            echo "SCAN_AI_KEY=reused-from-$source_app"
+            if [ -z "$key" ]; then echo "No reusable OpenAI key found on $SOURCE_AI_APP" >&2; exit 1; fi
+            echo "::add-mask::$key"
+            az webapp config appsettings set -g "$TARGET_RG" -n "$TARGET_APP" --settings "OPENAI_API_KEY_DEVELOPMENT=$key" --only-show-errors >/dev/null
+            echo "SCAN_AI_KEY=reused-from-$SOURCE_AI_APP"
           fi
           az webapp config appsettings set -g "$TARGET_RG" -n "$TARGET_APP" --settings "UnloadCompare.DocumentAIModel=gpt-5.6-luna" --only-show-errors >/dev/null
           test -n "$(az webapp config appsettings list -g "$TARGET_RG" -n "$TARGET_APP" --query "[?name=='OPENAI_API_KEY_DEVELOPMENT'].value | [0]" -o tsv --only-show-errors)"
@@ -149,7 +141,6 @@ jobs:
             sleep 5
           done
           test "$ok" = '1'
-
           logo_ok=0; logo_url="https://$TARGET_APP.azurewebsites.net/Content/babco-labs-logo.svg"
           for i in $(seq 1 20); do
             lcode=$(curl -sS --max-time 20 -o "$RUNNER_TEMP/live-logo.svg" -w '%{http_code}' "$logo_url" || true)
@@ -157,7 +148,6 @@ jobs:
             sleep 5
           done
           test "$logo_ok" = '1'
-
           auth_url="https://$TARGET_APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx"
           auth_ok=0
           for i in $(seq 1 12); do
