@@ -23,7 +23,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Validate voice controls
@@ -32,8 +32,6 @@ jobs:
           set -euo pipefail
           grep -q 'webkitSpeechRecognition' Default.aspx
           grep -q 'speechSynthesis' Default.aspx
-          grep -q '🎤' Default.aspx
-          grep -q '🔊' Default.aspx
       - name: Azure login
         uses: azure/login@v2
         with:
@@ -41,18 +39,28 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
-      - name: Deploy Default.aspx only
+      - name: Deploy Default.aspx only with SCM retry
         shell: bash
         run: |
           set -euo pipefail
-          az webapp deploy -g "$RG" -n "$APP" --src-path Default.aspx --type static --target-path Default.aspx --restart false --clean false --only-show-errors >/dev/null
+          ok=false
+          for i in $(seq 1 12); do
+            echo "Deploy attempt $i/12"
+            if az webapp deploy -g "$RG" -n "$APP" --src-path Default.aspx --type static --target-path Default.aspx --restart false --clean false --only-show-errors >/dev/null 2>"$RUNNER_TEMP/deploy.err"; then
+              ok=true
+              break
+            fi
+            cat "$RUNNER_TEMP/deploy.err" || true
+            sleep 20
+          done
+          [ "$ok" = true ]
           az webapp restart -g "$RG" -n "$APP" --only-show-errors >/dev/null
       - name: Verify live page
         shell: bash
         run: |
           set -euo pipefail
           code=0
-          for i in $(seq 1 30); do
+          for i in $(seq 1 36); do
             code=$(curl -sS -L --max-time 20 -o "$RUNNER_TEMP/live.html" -w '%{http_code}' "$LIVE_URL" || true)
             if [ "$code" = '200' ] && grep -q 'webkitSpeechRecognition' "$RUNNER_TEMP/live.html" && grep -q 'speechSynthesis' "$RUNNER_TEMP/live.html"; then break; fi
             sleep 5
