@@ -1,0 +1,1 @@
+Safety no-op used to cancel an accidental full deployment started by an Admin-only helper commit. This file has no runtime function.
