@@ -20,7 +20,7 @@ env:
   TARGET_URL: 'https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
   STD_SWA_NAME: 'babco-followup-capture-demo'
   SOURCE_AI_APP: 'babco-sqlagent-wf-2c606af4'
-  EXPECTED_SOURCE_COMMIT: '83f8d2742ddfb2d6363fa2a2d648dcc325824ddd'
+  EXPECTED_SOURCE_COMMIT: '713b78e86467813a4d2ecad1cea804f034032c3f'
 
 jobs:
   deploy-and-verify:
@@ -80,16 +80,22 @@ jobs:
           done
           curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/webapp-publish.zip' -o "$RUNNER_TEMP/webapp-publish.zip"
           unzip -t "$RUNNER_TEMP/webapp-publish.zip" >/dev/null
-          for f in Default.aspx UnloadCompare.aspx Site.Master Web.config bin/BabcoUnloadCompare.Web.dll Scripts/unload-compare.js; do unzip -Z1 "$RUNNER_TEMP/webapp-publish.zip" | grep -Fxq "$f"; done
+          for f in Default.aspx UnloadCompare.aspx Site.Master Web.config bin/BabcoUnloadCompare.Web.dll Scripts/common.js Scripts/unload-compare.js; do unzip -Z1 "$RUNNER_TEMP/webapp-publish.zip" | grep -Fxq "$f"; done
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'standard-app-header'
-          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'v1.3.0'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'v1.3.1'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'stdFeedbackBtn'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'Feedback Form'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'common.js?v=1.3.1'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" UnloadCompare.aspx | grep -Fq 'poDropdownBtn'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" UnloadCompare.aspx | grep -Fq '&#9662;'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" UnloadCompare.aspx | grep -Fq 'Upload Scan / PDF'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Scripts/common.js | grep -Fq "version:'1.3.1'"
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Scripts/unload-compare.js | grep -Fq 'SCANNED SHEET AI PREVIEW'
+          unzip -p "$RUNNER_TEMP/webapp-publish.zip" Web.config | grep -Fq 'responseEncoding="utf-8"'
           unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq '~/Content/babco-labs-logo.svg'
           if unzip -p "$RUNNER_TEMP/webapp-publish.zip" Site.Master | grep -Fq 'std-brand-fallback'; then echo 'BL fallback still present' >&2; exit 1; fi
-          echo 'V13_PACKAGE_VALIDATED=true'
+          if unzip -p "$RUNNER_TEMP/webapp-publish.zip" UnloadCompare.aspx | grep -Fq '>▼<'; then echo 'Raw dropdown Unicode icon still present' >&2; exit 1; fi
+          echo 'V131_PACKAGE_VALIDATED=true'
 
       - name: Inject canonical STD Policies SVG into deploy package
         shell: bash
@@ -144,7 +150,7 @@ jobs:
           diff -u "$RUNNER_TEMP/appsettings-before.txt" "$RUNNER_TEMP/appsettings-after.txt"
           echo 'CONFIG_PRESERVED=true'
 
-      - name: Verify live page local SVG and Entra redirect
+      - name: Verify live page assets and Entra redirect
         shell: bash
         run: |
           set -euo pipefail
@@ -165,6 +171,13 @@ jobs:
             sleep 5
           done
           test "$logo_ok" = '1'
+          js_ok=0; js_url="https://$TARGET_APP.azurewebsites.net/Scripts/common.js?v=1.3.1"
+          for i in $(seq 1 20); do
+            jcode=$(curl -sS --max-time 20 -o "$RUNNER_TEMP/live-common.js" -w '%{http_code}' "$js_url" || true)
+            if [ "$jcode" = '200' ] && grep -Fq "version:'1.3.1'" "$RUNNER_TEMP/live-common.js" && grep -Fq 'openFeedback' "$RUNNER_TEMP/live-common.js"; then js_ok=1; break; fi
+            sleep 5
+          done
+          test "$js_ok" = '1'
           auth_url="https://$TARGET_APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx"
           auth_ok=0
           for i in $(seq 1 12); do
@@ -178,6 +191,7 @@ jobs:
           test -n "$(az webapp config appsettings list -g "$TARGET_RG" -n "$TARGET_APP" --query "[?name=='OPENAI_API_KEY_DEVELOPMENT'].value | [0]" -o tsv --only-show-errors)"
           echo 'LIVE_PAGE_OK=true'
           echo 'LIVE_LOCAL_SVG_OK=true'
+          echo 'LIVE_COMMON_JS_V131_OK=true'
           echo 'SCAN_AI_CONFIGURED=true'
           echo 'ENTRA_OK=true'
           echo 'VERIFIED_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
