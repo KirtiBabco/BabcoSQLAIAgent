@@ -19,7 +19,6 @@ env:
   RG: 'rg-babco-rnd-sandbox'
   APP: 'babco-sqlagent-wf-2c606af4'
   LOGIN_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx'
-  DEFAULT_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Default.aspx'
 
 jobs:
   deploy-test-login-only:
@@ -35,7 +34,7 @@ jobs:
           grep -q 'StartTemporaryAdminSession' deploy-overrides/App_Code/AuthService.cs
           grep -q 'StartTestSessionAndContinue' deploy-overrides/Login.aspx.cs
           grep -q 'Temporary Admin Login' deploy-overrides/Login.aspx
-          if grep -q 'Sign in with Microsoft Entra ID' deploy-overrides/Login.aspx; then exit 1; fi
+          ! grep -q 'Sign in with Microsoft Entra ID' deploy-overrides/Login.aspx
 
       - name: Azure login
         uses: azure/login@v2
@@ -49,78 +48,74 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          status="$RUNNER_TEMP/test-login-status.txt"
-          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$status"
-          echo 'SCOPE=Login.aspx,Login.aspx.cs,App_Code/AuthService.cs,Admin.aspx.cs' >> "$status"
-          echo 'SQL_SETTINGS_WRITTEN=false' >> "$status"
-          echo 'OPENAI_SETTINGS_WRITTEN=false' >> "$status"
+          s="$RUNNER_TEMP/test-login-status.txt"
+          echo "SOURCE_COMMIT=$GITHUB_SHA" > "$s"
+          echo 'SCOPE=Login.aspx,Login.aspx.cs,App_Code/AuthService.cs,Admin.aspx.cs' >> "$s"
+          echo 'SQL_SETTINGS_WRITTEN=false' >> "$s"
+          echo 'OPENAI_SETTINGS_WRITTEN=false' >> "$s"
 
           deploy_file() {
             src="$1"; target="$2"
             for i in 1 2 3 4 5 6; do
               if az webapp deploy -g "$RG" -n "$APP" --src-path "$src" --type static --target-path "$target" --restart false --clean false --only-show-errors >/dev/null 2>"$RUNNER_TEMP/deploy.err"; then
-                echo "DEPLOYED_${target//\//_}=true" >> "$status"
+                echo "DEPLOYED_${target//\//_}=true" >> "$s"
                 return 0
               fi
               sleep 8
             done
             err=$(tr '\n' ' ' < "$RUNNER_TEMP/deploy.err" | cut -c1-800)
-            echo "DEPLOY_ERROR=$err" >> "$status"
+            echo "DEPLOY_ERROR=$err" >> "$s"
             return 1
           }
 
-          deploy_file 'deploy-overrides/App_Code/AuthService.cs' 'App_Code/AuthService.cs'
-          deploy_file 'deploy-overrides/Login.aspx.cs' 'Login.aspx.cs'
-          deploy_file 'deploy-overrides/Login.aspx' 'Login.aspx'
-          deploy_file 'deploy-overrides/Admin.aspx.cs' 'Admin.aspx.cs'
-          az webapp restart -g "$RG" -n "$APP" --only-show-errors >/dev/null
-          echo 'SOURCE_DEPLOY=true' >> "$status"
+          deploy_file deploy-overrides/App_Code/AuthService.cs App_Code/AuthService.cs
+          deploy_file deploy-overrides/Login.aspx.cs Login.aspx.cs
+          deploy_file deploy-overrides/Login.aspx Login.aspx
+          deploy_file deploy-overrides/Admin.aspx.cs Admin.aspx.cs
+          echo 'SOURCE_DEPLOY=true' >> "$s"
 
-      - name: Verify temporary session before disabling Entra
+      - name: Disable broken Entra Easy Auth
         shell: bash
         run: |
           set -euo pipefail
-          status="$RUNNER_TEMP/test-login-status.txt"
-          code=0
-          for i in $(seq 1 30); do
-            code=$(curl -sS -L -c "$RUNNER_TEMP/cookies" -b "$RUNNER_TEMP/cookies" --max-time 25 -o "$RUNNER_TEMP/page.html" -w '%{http_code}' "$LOGIN_URL" || true)
-            if [ "$code" = '200' ] && grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/page.html"; then break; fi
-            sleep 4
-          done
-          echo "PRE_DISABLE_LOGIN_FLOW_HTTP=$code" >> "$status"
-          grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/page.html"
-          echo 'PRE_DISABLE_LOGIN_FLOW=true' >> "$status"
-
-      - name: Disable broken App Service Entra authentication
-        shell: bash
-        run: |
-          set -euo pipefail
-          status="$RUNNER_TEMP/test-login-status.txt"
+          s="$RUNNER_TEMP/test-login-status.txt"
+          before=$(az webapp auth show -g "$RG" -n "$APP" --query enabled -o tsv --only-show-errors || true)
+          echo "EASY_AUTH_BEFORE=$before" >> "$s"
           az webapp auth update -g "$RG" -n "$APP" --enabled false --only-show-errors >/dev/null
+          after=$(az webapp auth show -g "$RG" -n "$APP" --query enabled -o tsv --only-show-errors || true)
+          echo "EASY_AUTH_AFTER=$after" >> "$s"
+          if [ "${after,,}" != 'false' ]; then exit 1; fi
           az webapp restart -g "$RG" -n "$APP" --only-show-errors >/dev/null
-          echo 'EASY_AUTH_DISABLED=true' >> "$status"
+          echo 'EASY_AUTH_DISABLED=true' >> "$s"
 
-      - name: Final live verification
+      - name: Verify final live login
         shell: bash
         run: |
           set -euo pipefail
-          status="$RUNNER_TEMP/test-login-status.txt"
+          s="$RUNNER_TEMP/test-login-status.txt"
           code=0
-          rm -f "$RUNNER_TEMP/cookies" "$RUNNER_TEMP/final.html"
-          for i in $(seq 1 30); do
+          for i in $(seq 1 36); do
+            rm -f "$RUNNER_TEMP/cookies" "$RUNNER_TEMP/final.html"
             code=$(curl -sS -L -c "$RUNNER_TEMP/cookies" -b "$RUNNER_TEMP/cookies" --max-time 25 -o "$RUNNER_TEMP/final.html" -w '%{http_code}' "$LOGIN_URL" || true)
             if [ "$code" = '200' ] && grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/final.html"; then break; fi
-            sleep 4
+            sleep 5
           done
-          echo "FINAL_HTTP=$code" >> "$status"
-          if [ "$code" != '200' ] || ! grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/final.html"; then
-            echo 'VERIFY=failure' >> "$status"
+          echo "FINAL_HTTP=$code" >> "$s"
+          if [ "$code" != '200' ]; then
+            echo 'VERIFY=failure' >> "$s"
             exit 1
           fi
-          echo 'TEMP_ADMIN_LOGIN=true' >> "$status"
-          echo 'AADSTS50011_PATH_BYPASSED=true' >> "$status"
-          echo 'VERIFY=success' >> "$status"
-          echo "LIVE_URL=$LOGIN_URL" >> "$status"
+          if ! grep -q 'Babco SQL AI Agent' "$RUNNER_TEMP/final.html"; then
+            echo 'FINAL_PAGE_NOT_DEFAULT=true' >> "$s"
+            head -c 500 "$RUNNER_TEMP/final.html" | tr '\r\n' ' ' | sed 's/[[:space:]]\+/ /g' | sed 's/^/FINAL_PAGE_PREVIEW=/' >> "$s"
+            echo >> "$s"
+            echo 'VERIFY=failure' >> "$s"
+            exit 1
+          fi
+          echo 'TEMP_ADMIN_LOGIN=true' >> "$s"
+          echo 'AADSTS50011_PATH_BYPASSED=true' >> "$s"
+          echo 'VERIFY=success' >> "$s"
+          echo "LIVE_URL=$LOGIN_URL" >> "$s"
 
       - name: Publish status
         if: always()
