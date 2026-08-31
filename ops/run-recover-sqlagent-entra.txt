@@ -1,2 +1,2 @@
 Scan existing Azure App Service Entra clients read-only, select a registration that already accepts https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback, apply only that auth provider to babco-sqlagent-wf-2c606af4, and verify AADSTS50011 is gone.
-Run requested 2026-08-27 strict verification.
+Run requested 2026-08-31 from live AADSTS50011 screenshot. Auth-only recovery; do not touch SQL, OpenAI, source code, or BabcoUnloadCompare.
