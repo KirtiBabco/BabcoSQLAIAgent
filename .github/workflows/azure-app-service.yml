@@ -12,6 +12,8 @@ on:
       - '.github/workflows/deploy-admin-ui.yml'
       - 'ops/run-recover-sqlagent-entra.txt'
       - '.github/workflows/recover-sqlagent-entra-from-existing-app.yml'
+      - 'ops/run-restore-working-entra-client.txt'
+      - '.github/workflows/restore-working-entra-client-sqlagent.yml'
       - '.github/workflows/azure-app-service.yml'
   workflow_dispatch:
 
