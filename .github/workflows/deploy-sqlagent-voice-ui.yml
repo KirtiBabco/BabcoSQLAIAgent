@@ -1,4 +1,4 @@
-name: Deploy SQL Agent Voice UI
+name: Restore Complete SQL Agent UI
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
 
 permissions:
   id-token: write
-  contents: write
+  contents: read
 
 env:
   AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
@@ -18,20 +18,31 @@ env:
   AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
   RG: 'rg-babco-rnd-sandbox'
   APP: 'babco-sqlagent-wf-2c606af4'
-  LIVE_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Default.aspx'
+  LOGIN_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx'
+  ADMIN_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Admin.aspx'
 
 jobs:
-  deploy:
+  restore-ui:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Validate voice controls
+
+      - name: Validate complete UI package
         shell: bash
         run: |
           set -euo pipefail
-          grep -q 'webkitSpeechRecognition' Default.aspx
-          grep -q 'speechSynthesis' Default.aspx
+          grep -q 'Costing / Admin' deploy-overrides/Default.aspx
+          grep -q 'ddlLanguage' deploy-overrides/Default.aspx
+          grep -q 'webkitSpeechRecognition' deploy-overrides/Default.aspx
+          grep -q 'speechSynthesis' deploy-overrides/Default.aspx
+          grep -q 'btnClear' deploy-overrides/Default.aspx
+          grep -q 'Agent Answer' deploy-overrides/Default.aspx
+          test -s deploy-overrides/Admin.aspx
+          test -s deploy-overrides/Admin.aspx.cs
+          grep -q 'Temporary Admin Login' deploy-overrides/Login.aspx
+          grep -q 'StartTemporaryAdminSession' deploy-overrides/App_Code/AuthService.cs
+
       - name: Azure login
         uses: azure/login@v2
         with:
@@ -39,33 +50,60 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
-      - name: Deploy Default.aspx only with SCM retry
+
+      - name: Keep Entra enabled and allow simple login page
         shell: bash
         run: |
           set -euo pipefail
-          ok=false
-          for i in $(seq 1 12); do
-            echo "Deploy attempt $i/12"
-            if az webapp deploy -g "$RG" -n "$APP" --src-path Default.aspx --type static --target-path Default.aspx --restart false --clean false --only-show-errors >/dev/null 2>"$RUNNER_TEMP/deploy.err"; then
-              ok=true
-              break
-            fi
-            cat "$RUNNER_TEMP/deploy.err" || true
-            sleep 20
-          done
-          [ "$ok" = true ]
+          az webapp auth update -g "$RG" -n "$APP" --enabled true --unauthenticated-client-action AllowAnonymous --only-show-errors >/dev/null
+
+      - name: Restore complete UI files only
+        shell: bash
+        run: |
+          set -euo pipefail
+          deploy_one() {
+            src="$1"; target="$2"; ok=false
+            for i in $(seq 1 12); do
+              echo "Deploy $target attempt $i/12"
+              if az webapp deploy -g "$RG" -n "$APP" --src-path "$src" --type static --target-path "$target" --restart false --clean false --only-show-errors >/dev/null 2>"$RUNNER_TEMP/deploy.err"; then
+                ok=true
+                break
+              fi
+              cat "$RUNNER_TEMP/deploy.err" || true
+              sleep 15
+            done
+            [ "$ok" = true ]
+          }
+
+          deploy_one deploy-overrides/App_Code/AuthService.cs App_Code/AuthService.cs
+          deploy_one deploy-overrides/Login.aspx.cs Login.aspx.cs
+          deploy_one deploy-overrides/Login.aspx Login.aspx
+          deploy_one deploy-overrides/Default.aspx Default.aspx
+          deploy_one deploy-overrides/Admin.aspx.cs Admin.aspx.cs
+          deploy_one deploy-overrides/Admin.aspx Admin.aspx
           az webapp restart -g "$RG" -n "$APP" --only-show-errors >/dev/null
-      - name: Verify live page
+
+      - name: Verify restored functionality
         shell: bash
         run: |
           set -euo pipefail
           code=0
           for i in $(seq 1 36); do
-            code=$(curl -sS -L --max-time 20 -o "$RUNNER_TEMP/live.html" -w '%{http_code}' "$LIVE_URL" || true)
-            if [ "$code" = '200' ] && grep -q 'webkitSpeechRecognition' "$RUNNER_TEMP/live.html" && grep -q 'speechSynthesis' "$RUNNER_TEMP/live.html"; then break; fi
+            rm -f "$RUNNER_TEMP/cookies" "$RUNNER_TEMP/live.html"
+            code=$(curl -sS -L -c "$RUNNER_TEMP/cookies" -b "$RUNNER_TEMP/cookies" --max-time 25 -o "$RUNNER_TEMP/live.html" -w '%{http_code}' "$LOGIN_URL" || true)
+            if [ "$code" = '200' ] && grep -q 'Costing / Admin' "$RUNNER_TEMP/live.html" && grep -q 'ddlLanguage' "$RUNNER_TEMP/live.html" && grep -q 'webkitSpeechRecognition' "$RUNNER_TEMP/live.html" && grep -q 'Agent Answer' "$RUNNER_TEMP/live.html"; then
+              break
+            fi
             sleep 5
           done
           echo "LIVE_HTTP=$code"
           [ "$code" = '200' ]
+          grep -q 'Costing / Admin' "$RUNNER_TEMP/live.html"
+          grep -q 'ddlLanguage' "$RUNNER_TEMP/live.html"
           grep -q 'webkitSpeechRecognition' "$RUNNER_TEMP/live.html"
           grep -q 'speechSynthesis' "$RUNNER_TEMP/live.html"
+          grep -q 'Agent Answer' "$RUNNER_TEMP/live.html"
+
+          adminCode=$(curl -sS -b "$RUNNER_TEMP/cookies" --max-time 20 -o "$RUNNER_TEMP/admin.html" -w '%{http_code}' "$ADMIN_URL" || true)
+          echo "ADMIN_HTTP=$adminCode"
+          [ "$adminCode" = '200' ]
