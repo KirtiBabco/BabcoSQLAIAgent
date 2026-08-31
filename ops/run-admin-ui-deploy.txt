@@ -1,1 +1,1 @@
-Deploy current SQL AI Agent source with Admin/Costing UI only. Preserve all existing SQL, Entra, OpenAI and Babco runtime settings unchanged.
+Deploy only Admin.aspx, Admin.aspx.cs, and the minimal Default.aspx Admin link through Kudu VFS. Do not write AuthService, AppConfig, Web.config, Login/AuthComplete files, App Service app settings, or Easy Auth settings. Preserve SQL, Entra, OpenAI, and Babco runtime configuration unchanged. Safe Admin/Costing restore trigger: 2026-08-31.
