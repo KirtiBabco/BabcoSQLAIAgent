@@ -10,6 +10,8 @@ on:
       - 'deploy-overrides/Admin.aspx'
       - 'deploy-overrides/Admin.aspx.cs'
       - '.github/workflows/deploy-admin-ui.yml'
+      - 'ops/run-recover-sqlagent-entra.txt'
+      - '.github/workflows/recover-sqlagent-entra-from-existing-app.yml'
       - '.github/workflows/azure-app-service.yml'
   workflow_dispatch:
 
