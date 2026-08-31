@@ -46,12 +46,13 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Deploy Admin Costing with pinned helper
+      - name: Deploy only Admin Costing over FTPS
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $status=Join-Path $env:RUNNER_TEMP 'admin-costing-safe-status.txt'
           "SOURCE_COMMIT=$env:GITHUB_SHA" | Set-Content $status -Encoding ascii
+          Add-Content $status 'DEPLOY_METHOD=FTPS'
           Add-Content $status 'DEPLOY_SCOPE=Admin.aspx,Admin.aspx.cs,Default.aspx-link-only'
           Add-Content $status 'AUTH_FILES_WRITTEN=false'
           Add-Content $status 'CONFIG_FILES_WRITTEN=false'
@@ -70,32 +71,93 @@ jobs:
           function CanonicalAppSettings(){
             return (az webapp config appsettings list -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json | Sort-Object name | ConvertTo-Json -Depth 20 -Compress)
           }
-          $settingsHashBefore=HashText (CanonicalAppSettings)
-
-          $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
-          $p=@($profiles | Where-Object {$_.publishMethod -eq 'MSDeploy' -or $_.publishMethod -eq 'ZipDeploy'} | Select-Object -First 1)
-          if($p.Count -eq 0){throw 'Publishing profile unavailable.'}
-          $u=[string]$p[0].userName
-          $pw=[string]$p[0].userPWD
-          Write-Output "::add-mask::$u"
-          Write-Output "::add-mask::$pw"
-          $basic=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($u+':'+$pw))
-          $headers=@{Authorization="Basic $basic"}
-
-          $helperUrl="https://raw.githubusercontent.com/KirtiBabco/BabcoSQLAIAgent/$env:GITHUB_SHA/ops/deploy-admin-live.ps1"
-          $remote="`$u='$helperUrl';`$p='D:\home\data\deploy-admin-live.ps1';Invoke-WebRequest -Uri `$u -OutFile `$p -UseBasicParsing -TimeoutSec 60;& `$p -Commit '$env:GITHUB_SHA'"
-          $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remote))
-          $body=@{command="powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $enc";dir='site\wwwroot'} | ConvertTo-Json -Compress
-          $rr=Invoke-RestMethod -Method Post -Uri "https://$env:WEB_APP.scm.azurewebsites.net/api/command" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 180
-          if(-not [string]::IsNullOrWhiteSpace([string]$rr.Error)){throw ('Kudu command error: '+[string]$rr.Error)}
-          $markers=@([string]$rr.Output -split "`r?`n" | Where-Object {$_ -match '^(PROTECTED_|DEFAULT_|ADMIN_)'})
-          $markers | Add-Content $status
-          foreach($required in @('PROTECTED_FILES_UNCHANGED=true','ADMIN_FILE=true','ADMIN_COSTING=true','ADMIN_CODEBEHIND=true','ADMIN_AUTHSERVICE_LIVE=false','DEFAULT_ADMIN_LINK=true')){
-            if(-not($markers -contains $required)){throw "Kudu verification missing: $required"}
+          function FtpDownload([string]$relative,[string]$local){
+            $url=$script:ftpBase+'/'+($relative.Replace('\\','/'))
+            & curl.exe --silent --show-error --fail --ssl-reqd --user ($script:ftpUser+':'+$script:ftpPassword) --output $local $url
+            if($LASTEXITCODE -ne 0){throw "FTPS download failed for $relative with exit $LASTEXITCODE"}
+          }
+          function FtpUpload([string]$relative,[string]$local){
+            $url=$script:ftpBase+'/'+($relative.Replace('\\','/'))
+            & curl.exe --silent --show-error --fail --ssl-reqd --ftp-create-dirs --user ($script:ftpUser+':'+$script:ftpPassword) --upload-file $local $url
+            if($LASTEXITCODE -ne 0){throw "FTPS upload failed for $relative with exit $LASTEXITCODE"}
           }
 
+          $settingsHashBefore=HashText (CanonicalAppSettings)
+          $profiles=az webapp deployment list-publishing-profiles -g $env:RESOURCE_GROUP -n $env:WEB_APP -o json | ConvertFrom-Json
+          $ftp=@($profiles | Where-Object {$_.publishMethod -eq 'FTP'} | Select-Object -First 1)
+          if($ftp.Count -eq 0){throw 'FTP publishing profile unavailable.'}
+          $script:ftpUser=[string]$ftp[0].userName
+          $script:ftpPassword=[string]$ftp[0].userPWD
+          Write-Output "::add-mask::$script:ftpUser"
+          Write-Output "::add-mask::$script:ftpPassword"
+          $publishUrl=[string]$ftp[0].publishUrl
+          if([string]::IsNullOrWhiteSpace($publishUrl)){throw 'FTP publish URL unavailable.'}
+          if($publishUrl -notmatch '^[a-zA-Z]+://'){$publishUrl='ftp://'+$publishUrl}
+          $ftpUri=[Uri]$publishUrl
+          $script:ftpBase='ftp://'+$ftpUri.Authority+$ftpUri.AbsolutePath.TrimEnd('/')
+
+          $tmp=Join-Path $env:RUNNER_TEMP ('admin-ftps-'+[Guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $tmp -Force|Out-Null
+          try{
+            $protected=@('Login.aspx','Login.aspx.cs','AuthComplete.aspx','AuthComplete.aspx.cs','App_Code\AuthService.cs','App_Code\AppConfig.cs','Web.config')
+            $before=@{}
+            foreach($rel in $protected){
+              $local=Join-Path $tmp (($rel -replace '[\\/]','_')+'.before')
+              FtpDownload $rel $local
+              $before[$rel]=(Get-FileHash $local -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+
+            $defaultLocal=Join-Path $tmp 'Default.aspx'
+            FtpDownload 'Default.aspx' $defaultLocal
+            $default=Get-Content $defaultLocal -Raw
+            $patched=$default
+            $patchType='already-present'
+            if(-not $patched.Contains('Costing / Admin')){
+              $old='    <div class="status">&#9679; AI Agent Ready</div>'
+              $new='    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end"><a href="Admin.aspx" style="display:inline-block;padding:8px 11px;border-radius:18px;border:1px solid #fde68a;background:#fef3c7;color:#92400e;text-decoration:none;font-size:12px;font-weight:600">Costing / Admin</a><div class="status">&#9679; AI Agent Ready</div></div>'
+              if($patched.Contains($old)){$patched=$patched.Replace($old,$new);$patchType='base-status-marker'}
+              elseif($patched.Contains('<span class="status">')){$patched=$patched.Replace('<span class="status">','<a class="navbtn adminlink" href="Admin.aspx">Costing / Admin</a><span class="status">');$patchType='span-status-marker'}
+              else{throw 'Unknown Default.aspx layout; refusing broad replacement.'}
+              [IO.File]::WriteAllText($defaultLocal,$patched,(New-Object Text.UTF8Encoding($false)))
+            }
+
+            FtpUpload 'Admin.aspx' (Join-Path $env:GITHUB_WORKSPACE 'deploy-overrides\Admin.aspx')
+            FtpUpload 'Admin.aspx.cs' (Join-Path $env:GITHUB_WORKSPACE 'deploy-overrides\Admin.aspx.cs')
+            if($patched -ne $default){FtpUpload 'Default.aspx' $defaultLocal}
+            Add-Content $status ('DEFAULT_LINK_PATCH='+$patchType)
+
+            $unchanged=$true
+            foreach($rel in $protected){
+              $local=Join-Path $tmp (($rel -replace '[\\/]','_')+'.after')
+              FtpDownload $rel $local
+              $after=(Get-FileHash $local -Algorithm SHA256).Hash.ToLowerInvariant()
+              if($before[$rel] -ne $after){$unchanged=$false;Add-Content $status ('PROTECTED_CHANGED='+$rel)}
+            }
+            Add-Content $status ('PROTECTED_FILES_UNCHANGED='+$unchanged.ToString().ToLowerInvariant())
+            if(-not $unchanged){throw 'Protected live files changed unexpectedly.'}
+
+            $liveAdmin=Join-Path $tmp 'Admin.live.aspx'
+            $liveAdminCs=Join-Path $tmp 'Admin.live.aspx.cs'
+            $liveDefault=Join-Path $tmp 'Default.live.aspx'
+            FtpDownload 'Admin.aspx' $liveAdmin
+            FtpDownload 'Admin.aspx.cs' $liveAdminCs
+            FtpDownload 'Default.aspx' $liveDefault
+            $adminText=Get-Content $liveAdmin -Raw
+            $adminCsText=Get-Content $liveAdminCs -Raw
+            $defaultText=Get-Content $liveDefault -Raw
+            Add-Content $status ('ADMIN_FILE='+$adminText.Contains('Admin Console').ToString().ToLowerInvariant())
+            Add-Content $status ('ADMIN_COSTING='+$adminText.Contains('Costing').ToString().ToLowerInvariant())
+            Add-Content $status ('ADMIN_CODEBEHIND='+(Test-Path $liveAdminCs).ToString().ToLowerInvariant())
+            Add-Content $status ('ADMIN_AUTHSERVICE_LIVE='+$adminCsText.Contains('AuthService').ToString().ToLowerInvariant())
+            Add-Content $status ('DEFAULT_ADMIN_LINK='+$defaultText.Contains('Costing / Admin').ToString().ToLowerInvariant())
+            if(-not $adminText.Contains('Admin Console')){throw 'Live Admin.aspx verification failed.'}
+            if($adminCsText.Contains('AuthService')){throw 'Live Admin code unexpectedly references AuthService.'}
+            if(-not $defaultText.Contains('Costing / Admin')){throw 'Live Default Admin link verification failed.'}
+          }
+          finally{Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue}
+
           $settingsHashAfter=HashText (CanonicalAppSettings)
-          Add-Content $status ("APPSETTINGS_UNCHANGED="+($settingsHashBefore -eq $settingsHashAfter).ToString().ToLowerInvariant())
+          Add-Content $status ('APPSETTINGS_UNCHANGED='+($settingsHashBefore -eq $settingsHashAfter).ToString().ToLowerInvariant())
           if($settingsHashBefore -ne $settingsHashAfter){throw 'App settings changed unexpectedly.'}
           Add-Content $status 'DEPLOY=success'
 
@@ -123,7 +185,7 @@ jobs:
             try{$entraCode=[int]$_.Exception.Response.StatusCode;$loc=[string]$_.Exception.Response.Headers['Location'];if($entraCode -eq 302 -and $loc){$entraChallenge=$true}}catch{}
           }
           Add-Content $status "ENTRA_HTTP=$entraCode"
-          Add-Content $status ("ENTRA_CHALLENGE="+$entraChallenge.ToString().ToLowerInvariant())
+          Add-Content $status ('ENTRA_CHALLENGE='+$entraChallenge.ToString().ToLowerInvariant())
 
           $adminCode=0
           try{$r2=Invoke-WebRequest -Uri $env:ADMIN_URL -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop;$adminCode=[int]$r2.StatusCode}catch{try{$adminCode=[int]$_.Exception.Response.StatusCode}catch{}}
@@ -158,7 +220,7 @@ jobs:
           $p=Join-Path $env:RUNNER_TEMP 'admin-costing-safe-status.txt'
           if(-not(Test-Path $p)){throw 'Status file missing.'}
           $lines=@(Get-Content $p)
-          foreach($required in @('AUTH_FILES_WRITTEN=false','CONFIG_FILES_WRITTEN=false','APP_SETTINGS_WRITTEN=false','AUTH_SETTINGS_WRITTEN=false','PACKAGE_ADMIN_VALID=true','ADMIN_AUTHSERVICE_DEPENDENCY=false','ADMIN_EASYAUTH_HEADERS=true','PROTECTED_FILES_UNCHANGED=true','APPSETTINGS_UNCHANGED=true','ADMIN_FILE=true','ADMIN_COSTING=true','ADMIN_CODEBEHIND=true','ADMIN_AUTHSERVICE_LIVE=false','DEFAULT_ADMIN_LINK=true','DEPLOY=success','LOGIN_HTTP=200','ENTRA_CHALLENGE=true')){
+          foreach($required in @('DEPLOY_METHOD=FTPS','AUTH_FILES_WRITTEN=false','CONFIG_FILES_WRITTEN=false','APP_SETTINGS_WRITTEN=false','AUTH_SETTINGS_WRITTEN=false','PACKAGE_ADMIN_VALID=true','ADMIN_AUTHSERVICE_DEPENDENCY=false','ADMIN_EASYAUTH_HEADERS=true','PROTECTED_FILES_UNCHANGED=true','APPSETTINGS_UNCHANGED=true','ADMIN_FILE=true','ADMIN_COSTING=true','ADMIN_CODEBEHIND=true','ADMIN_AUTHSERVICE_LIVE=false','DEFAULT_ADMIN_LINK=true','DEPLOY=success','LOGIN_HTTP=200','ENTRA_CHALLENGE=true')){
             if(-not($lines -contains $required)){throw "Missing verification marker: $required"}
           }
           $adminLine=$lines | Where-Object {$_ -match '^ADMIN_HTTP_UNAUTH='} | Select-Object -Last 1
