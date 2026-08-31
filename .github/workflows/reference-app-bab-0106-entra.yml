@@ -38,11 +38,11 @@ jobs:
           out="$RUNNER_TEMP/status.txt"
           : > "$out"
 
-          ref=$(az webapp list --query "[?tolower(name)=='app-bab-0106'] | [0]" -o json --only-show-errors)
-          if [ "$ref" = "null" ] || [ -z "$ref" ]; then
-            ref=$(az resource list --query "[?tolower(name)=='app-bab-0106'] | [0]" -o json --only-show-errors)
+          ref=$(az webapp list -o json --only-show-errors | jq -c '[.[] | select((.name|ascii_downcase)=="app-bab-0106")][0] // empty')
+          if [ -z "$ref" ]; then
+            ref=$(az resource list -o json --only-show-errors | jq -c '[.[] | select((.name|ascii_downcase)=="app-bab-0106")][0] // empty')
           fi
-          if [ "$ref" = "null" ] || [ -z "$ref" ]; then
+          if [ -z "$ref" ]; then
             echo 'REFERENCE_FOUND=false' >> "$out"
             echo 'VERIFY=failure' >> "$out"
             exit 0
