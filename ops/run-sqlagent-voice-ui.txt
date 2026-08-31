@@ -1,0 +1,1 @@
+Deploy Default.aspx only with browser-managed microphone speech recognition and browser speech synthesis speaker controls. Do not modify Login, Entra, SQL, OpenAI, Admin, or other application files.
