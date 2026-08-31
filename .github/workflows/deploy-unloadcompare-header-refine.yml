@@ -1,0 +1,118 @@
+name: Deploy UnloadCompare Header Refinement
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-unloadcompare-header-refine.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  TARGET_RG: 'rg-babco-rnd-sandbox'
+  TARGET_APP: 'app-babco-unloadcompare-0e27b0b7-260818'
+  STD_SWA_NAME: 'babco-followup-capture-demo'
+  EXPECTED_SOURCE_COMMIT: 'a708becb6b95439ed6cebd71157b9bd162e01041'
+
+jobs:
+  deploy-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Preserve configuration names
+        shell: bash
+        run: |
+          set -euo pipefail
+          az webapp config appsettings list -g "$TARGET_RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/apps-before"
+          az webapp config connection-string list -g "$TARGET_RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/conns-before"
+
+      - name: Download and validate compiled package
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/build.txt' -o "$RUNNER_TEMP/build.txt" || true
+            if grep -Fq "Source commit: $EXPECTED_SOURCE_COMMIT" "$RUNNER_TEMP/build.txt" 2>/dev/null; then break; fi
+            [ "$i" -lt 20 ] || exit 1
+            sleep 5
+          done
+          curl -fsSL 'https://raw.githubusercontent.com/KirtiBabco/BabcoUnloadCompare/deployment-artifacts/webapp-publish.zip' -o "$RUNNER_TEMP/site.zip"
+          unzip -t "$RUNNER_TEMP/site.zip" >/dev/null
+          unzip -p "$RUNNER_TEMP/site.zip" Site.Master > "$RUNNER_TEMP/master"
+          grep -Fq '.sidebar-version{display:block;margin-top:4px;padding:0;border:0;border-radius:0;background:transparent' "$RUNNER_TEMP/master"
+          grep -Fq 'background:rgba(255,255,255,.78)' "$RUNNER_TEMP/master"
+          grep -Fq '.std-user-card{display:grid' "$RUNNER_TEMP/master"
+          grep -Fq 'background:transparent;border:0;border-left:1px solid #e2d8c4' "$RUNNER_TEMP/master"
+          echo 'VISUAL_REFINEMENT_PACKAGE_OK=true'
+
+      - name: Inject canonical Babco Labs SVG
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="$(az staticwebapp show -g "$TARGET_RG" -n "$STD_SWA_NAME" --query defaultHostname -o tsv --only-show-errors)"
+          curl -fsSL "https://$host/assets/babco-labs-logo.svg" -o "$RUNNER_TEMP/logo.svg"
+          grep -Fq '<svg' "$RUNNER_TEMP/logo.svg"
+          rm -rf "$RUNNER_TEMP/pkg"; mkdir -p "$RUNNER_TEMP/pkg/Content"
+          unzip -q "$RUNNER_TEMP/site.zip" -d "$RUNNER_TEMP/pkg"
+          cp "$RUNNER_TEMP/logo.svg" "$RUNNER_TEMP/pkg/Content/babco-labs-logo.svg"
+          rm "$RUNNER_TEMP/site.zip"
+          (cd "$RUNNER_TEMP/pkg" && zip -qr "$RUNNER_TEMP/site.zip" .)
+
+      - name: Deploy through ARM OneDeploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          ok=0
+          for n in 1 2 3; do
+            if az webapp deploy -g "$TARGET_RG" -n "$TARGET_APP" --src-path "$RUNNER_TEMP/site.zip" --type zip --clean false --restart true --only-show-errors; then ok=1; break; fi
+            sleep $((n*15))
+          done
+          test "$ok" = 1
+
+      - name: Prove configuration preserved
+        shell: bash
+        run: |
+          set -euo pipefail
+          az webapp config appsettings list -g "$TARGET_RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/apps-after"
+          az webapp config connection-string list -g "$TARGET_RG" -n "$TARGET_APP" --query '[].name' -o tsv --only-show-errors | sort > "$RUNNER_TEMP/conns-after"
+          diff -u "$RUNNER_TEMP/apps-before" "$RUNNER_TEMP/apps-after"
+          diff -u "$RUNNER_TEMP/conns-before" "$RUNNER_TEMP/conns-after"
+          echo 'CONFIG_PRESERVED=true'
+
+      - name: Verify live site and Entra
+        shell: bash
+        run: |
+          set -euo pipefail
+          page='https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/UnloadCompare.aspx'
+          live=0
+          for i in $(seq 1 25); do
+            curl -sS --max-redirs 0 -D "$RUNNER_TEMP/h" -o /dev/null "$page" || true
+            code="$(awk 'NR==1{print $2}' "$RUNNER_TEMP/h")"
+            loc="$(tr -d '\r' < "$RUNNER_TEMP/h" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,"");print;exit}')"
+            if [ "$code" = '302' ] && printf '%s' "$loc" | grep -Fq '/.auth/login/aad'; then live=1; break; fi
+            sleep 5
+          done
+          test "$live" = 1
+          curl -fsSL "https://$TARGET_APP.azurewebsites.net/Content/babco-labs-logo.svg" -o "$RUNNER_TEMP/live-logo"
+          grep -Fq '<svg' "$RUNNER_TEMP/live-logo"
+          auth="https://$TARGET_APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FUnloadCompare.aspx"
+          curl -sS --max-redirs 0 -D "$RUNNER_TEMP/a" -o /dev/null "$auth" || true
+          aloc="$(tr -d '\r' < "$RUNNER_TEMP/a" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,"");print;exit}')"
+          printf '%s' "$aloc" | grep -Eqi '^https://login\.(windows\.net|microsoftonline\.com)/'
+          echo 'LIVE_HEADER_REFINEMENT_OK=true'
+          echo 'ENTRA_OK=true'
+          echo 'VERIFIED_URL=https://app-babco-unloadcompare-0e27b0b7-260818.azurewebsites.net/'
