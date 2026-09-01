@@ -1,0 +1,48 @@
+STALE_REMOVE=C:\home\site\wwwroot\App_Code\PricingCalculator.cs=not_present
+STALE_REMOVE=D:\home\site\wwwroot\App_Code\PricingCalculator.cs=not_present
+STALE_EXISTS_AFTER=C:\home\site\wwwroot\App_Code\PricingCalculator.cs=False
+STALE_EXISTS_AFTER=D:\home\site\wwwroot\App_Code\PricingCalculator.cs=False
+LOGIN_HTTP=200
+LOGIN_OK=true
+ERROR_REPORT_BEGIN
+<Events><Event><System><Provider Name="ASP.NET 4.0.30319.0"/><EventID>1310</EventID><Level>2</Level><Task>0</Task><Keywords>Keywords</Keywords><TimeCreated SystemTime="2026-08-25T16:12:57Z"/><EventRecordID>168876921</EventRecordID><Channel>Application</Channel><Computer>DW1SDWK00035I</Computer><Security/></System><EventData><Data>3006</Data><Data>A parser error has occurred.</Data><Data>8/25/2026 4:12:57 PM</Data><Data>8/25/2026 4:12:57 PM</Data><Data>ad649b5a608743cf905aceb199cc9069</Data><Data>18</Data><Data>1</Data><Data>0</Data><Data>/LM/W3SVC/1074154899/ROOT-1-134321479519308055</Data><Data>Full</Data><Data>/</Data><Data>C:\home\site\wwwroot\</Data><Data>DW1SDWK00035I</Data><Data></Data><Data>6108</Data><Data>w3wp.exe</Data><Data>IIS APPPOOL\babco-sqlagent-wf-2c606af4</Data><Data>HttpParseException</Data><Data>Could not load type 'SQL_AI_Agent.AuthComplete'.
+   at System.Web.UI.TemplateParser.ParseString(String text, VirtualPath virtualPath, Encoding fileEncoding)
+   at System.Web.UI.TemplateParser.ParseFile(String physicalPath, VirtualPath virtualPath)
+   at System.Web.UI.TemplateParser.ParseInternal()
+   at System.Web.UI.TemplateParser.Parse()
+Could not load type 'SQL_AI_Agent.AuthComplete'.
+   at System.Web.UI.TemplateParser.ProcessException(Exception ex)
+   at System.Web.UI.TemplateParser.ParseStringInternal(String text, Encoding fileEncoding)
+   at System.Web.UI.TemplateParser.ParseString(String text, VirtualPath virtualPath, Encoding fileEncoding)
+Could not load type 'SQL_AI_Agent.AuthComplete'.
+   at System.Web.UI.TemplateParser.GetType(String typeName, Boolean ignoreCase, Boolean throwOnError)
+   at System.Web.UI.TemplateParser.ProcessInheritsAttribute(String baseTypeName, String codeFileBaseTypeName, String src, Assembly assembly)
+   at System.Web.UI.TemplateParser.PostProcessMainDirectiveAttributes(IDictionary parseData)
+</Data><Data>https://babco-sqlagent-wf-2c606af4.azurewebsites.net:443/AuthComplete.aspx</Data><Data>/AuthComplete.aspx</Data><Data>103.241.224.66</Data><Data>kirti@babcofoods.com</Data><Data>True</Data><Data>aad</Data><Data>IIS APPPOOL\babco-sqlagent-wf-2c606af4</Data><Data>7</Data><Data>IIS APPPOOL\babco-sqlagent-wf-2c606af4</Data><Data>False</Data><Data>   at System.Web.UI.TemplateParser.ParseString(String text, VirtualPath virtualPath, Encoding fileEncoding)
+   at System.Web.UI.TemplateParser.ParseFile(String physicalPath, VirtualPath virtualPath)
+   at System.Web.UI.TemplateParser.ParseInternal()
+   at System.Web.UI.TemplateParser.Parse()
+</Data></EventData></Event><Event><System><Provider Name="ASP.NET 4.0.30319.0"/><EventID>1310</EventID><Level>2</Level><Task>0</Task><Keywords>Keywords</Keywords><TimeCreated SystemTime="2026-08-27T11:55:39Z"/><EventRecordID>326236859</EventRecordID><Channel>Application</Channel><Computer>DW1SDWK00035I</Computer><Security/></System><EventData><Data>3007</Data><Data>A compilation error has occurred.</Data><Data>8/27/2026 11:55:39 AM</Data><Data>8/27/2026 11:55:39 AM</Data><Data>e13ee07a93c84c71936141cb4427a588</Data><Data>20</Data><Data>1</Data><Data>0</Data><Data>/LM/W3SVC/1074154899/ROOT-1-134323053003538923</Data><Data>Full</Data><Data>/</Data><Data>C:\home\site\wwwroot\</Data><Data>DW1SDWK00035I</Data><Data></Data><Data>3280</Data><Data>w3wp.exe</Data><Data>IIS APPPOOL\babco-sqlagent-wf-2c606af4</Data><Data>HttpCompileException</Data><Data>c:\home\site\wwwroot\AuthComplete.aspx(6): error CS0103: The name 'AuthService' does not exist in the current context
+</Data></EventData></Event><Event><System><Provider Name="ASP.NET 4.0.30319.0"/><EventID>1310</EventID><Level>2</Level><Task>0</Task><Keywords>Keywords</Keywords><TimeCreated SystemTime="2026-09-01T11:59:03Z"/><EventRecordID>758432734</EventRecordID><Channel>Application</Channel><Computer>DW1SDWK00035I</Computer><Security/></System><EventData><Data>3007</Data><Data>A compilation error has occurred.</Data><Data>9/1/2026 11:59:03 AM</Data><Data>9/1/2026 11:59:03 AM</Data><Data>73368116a7854a5ea66a6438c91bc698</Data><Data>10</Data><Data>1</Data><Data>0</Data><Data>/LM/W3SVC/1074154899/ROOT-2-134327375354327776</Data><Data>Full</Data><Data>/</Data><Data>C:\home\site\wwwroot\</Data><Data>DW1SDWK00035I</Data><Data></Data><Data>5204</Data><Data>w3wp.exe</Data><Data>IIS APPPOOL\babco-sqlagent-wf-2c606af4</Data><Data>HttpCompileException</Data><Data>c:\home\site\wwwroot\Login.aspx.cs(31): error CS0117: 'SQL_AI_Agent.AuthService' does not contain a definition for 'StartTemporaryAdminSession'
+<Events><Event><System><Provider Name="ASP.NET 4.0.30319.0"/><EventID>1310</EventID><Level>2</Level><Task>0</Task><Keywords>Keywords</Keywords><TimeCreated SystemTime="2026-08-25T16:12:57Z"/><EventRecordID>168876921</EventRecordID><Channel>Application</Channel><Computer>DW1SDWK00035I</Computer><Security/></System><EventData><Data>3006</Data><Data>A parser error has occurred.</Data><Data>8/25/2026 4:12:57 PM</Data><Data>8/25/2026 4:12:57 PM</Data><Data>ad649b5a608743cf905aceb199cc9069</Data><Data>18</Data><Data>1</Data><Data>0</Data><Data>/LM/W3SVC/1074154899/ROOT-1-134321479519308055</Data><Data>Full</Data><Data>/</Data><Data>C:\home\site\wwwroot\</Data><Data>DW1SDWK00035I</Data><Data></Data><Data>6108</Data><Data>w3wp.exe</Data><Data>IIS APPPOOL\babco-sqlagent-wf-2c606af4</Data><Data>HttpParseException</Data><Data>Could not load type 'SQL_AI_Agent.AuthComplete'.
+   at System.Web.UI.TemplateParser.ParseString(String text, VirtualPath virtualPath, Encoding fileEncoding)
+   at System.Web.UI.TemplateParser.ParseFile(String physicalPath, VirtualPath virtualPath)
+   at System.Web.UI.TemplateParser.ParseInternal()
+   at System.Web.UI.TemplateParser.Parse()
+Could not load type 'SQL_AI_Agent.AuthComplete'.
+   at System.Web.UI.TemplateParser.ProcessException(Exception ex)
+   at System.Web.UI.TemplateParser.ParseStringInternal(String text, Encoding fileEncoding)
+   at System.Web.UI.TemplateParser.ParseString(String text, VirtualPath virtualPath, Encoding fileEncoding)
+Could not load type 'SQL_AI_Agent.AuthComplete'.
+   at System.Web.UI.TemplateParser.GetType(String typeName, Boolean ignoreCase, Boolean throwOnError)
+   at System.Web.UI.TemplateParser.ProcessInheritsAttribute(String baseTypeName, String codeFileBaseTypeName, String src, Assembly assembly)
+   at System.Web.UI.TemplateParser.PostProcessMainDirectiveAttributes(IDictionary parseData)
+</Data><Data>https://babco-sqlagent-wf-2c606af4.azurewebsites.net:443/AuthComplete.aspx</Data><Data>/AuthComplete.aspx</Data><Data>103.241.224.66</Data><Data>kirti@babcofoods.com</Data><Data>True</Data><Data>aad</Data><Data>IIS APPPOOL\babco-sqlagent-wf-2c606af4</Data><Data>7</Data><Data>IIS APPPOOL\babco-sqlagent-wf-2c606af4</Data><Data>False</Data><Data>   at System.Web.UI.TemplateParser.ParseString(String text, VirtualPath virtualPath, Encoding fileEncoding)
+   at System.Web.UI.TemplateParser.ParseFile(String physicalPath, VirtualPath virtualPath)
+   at System.Web.UI.TemplateParser.ParseInternal()
+   at System.Web.UI.TemplateParser.Parse()
+</Data></EventData></Event><Event><System><Provider Name="ASP.NET 4.0.30319.0"/><EventID>1310</EventID><Level>2</Level><Task>0</Task><Keywords>Keywords</Keywords><TimeCreated SystemTime="2026-08-27T11:55:39Z"/><EventRecordID>326236859</EventRecordID><Channel>Application</Channel><Computer>DW1SDWK00035I</Computer><Security/></System><EventData><Data>3007</Data><Data>A compilation error has occurred.</Data><Data>8/27/2026 11:55:39 AM</Data><Data>8/27/2026 11:55:39 AM</Data><Data>e13ee07a93c84c71936141cb4427a588</Data><Data>20</Data><Data>1</Data><Data>0</Data><Data>/LM/W3SVC/1074154899/ROOT-1-134323053003538923</Data><Data>Full</Data><Data>/</Data><Data>C:\home\site\wwwroot\</Data><Data>DW1SDWK00035I</Data><Data></Data><Data>3280</Data><Data>w3wp.exe</Data><Data>IIS APPPOOL\babco-sqlagent-wf-2c606af4</Data><Data>HttpCompileException</Data><Data>c:\home\site\wwwroot\AuthComplete.aspx(6): error CS0103: The name 'AuthService' does not exist in the current context
+</Data></EventData></Event><Event><System><Provider Name="ASP.NET 4.0.30319.0"/><EventID>1310</EventID><Level>2</Level><Task>0</Task><Keywords>Keywords</Keywords><TimeCreated SystemTime="2026-09-01T11:59:03Z"/><EventRecordID>758432734</EventRecordID><Channel>Application</Channel><Computer>DW1SDWK00035I</Computer><Security/></System><EventData><Data>3007</Data><Data>A compilation error has occurred.</Data><Data>9/1/2026 11:59:03 AM</Data><Data>9/1/2026 11:59:03 AM</Data><Data>73368116a7854a5ea66a6438c91bc698</Data><Data>10</Data><Data>1</Data><Data>0</Data><Data>/LM/W3SVC/1074154899/ROOT-2-134327375354327776</Data><Data>Full</Data><Data>/</Data><Data>C:\home\site\wwwroot\</Data><Data>DW1SDWK00035I</Data><Data></Data><Data>5204</Data><Data>w3wp.exe</Data><Data>IIS APPPOOL\babco-sqlagent-wf-2c606af4</Data><Data>HttpCompileException</Data><Data>c:\home\site\wwwroot\Login.aspx.cs(31): error CS0117: 'SQL_AI_Agent.AuthService' does not contain a definition for 'StartTemporaryAdminSession'
+ERROR_REPORT_END
+SOURCE_COMMIT=a8c6a23ab54f3cd0b67d2f96eb3060abd47a7cd6
+CHECKED_UTC=2026-09-01T12:15:07.2514203Z
