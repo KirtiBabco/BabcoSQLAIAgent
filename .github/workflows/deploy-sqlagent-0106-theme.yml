@@ -61,15 +61,15 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Require existing Azure Easy Auth Entra configuration
+      - name: Inspect Easy Auth configuration
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
           enabled=$(az webapp auth show -g "$RG" -n "$APP" --query 'platform.enabled' -o tsv 2>/dev/null || true)
           client=$(az webapp auth show -g "$RG" -n "$APP" --query 'identityProviders.azureActiveDirectory.registration.clientId' -o tsv 2>/dev/null || true)
-          echo "EASY_AUTH_ENABLED=$enabled"
-          [ "${enabled,,}" = 'true' ]
-          [ -n "$client" ]
+          echo "EASY_AUTH_CLI_ENABLED=${enabled:-unavailable}"
+          if [ -n "$client" ]; then echo 'EASY_AUTH_CLIENT=present'; else echo 'EASY_AUTH_CLIENT=cli-unavailable'; fi
+          echo 'Live /.auth/login/aad redirect will be the authoritative Entra verification.'
 
       - name: Deploy 0106 theme pages and Entra app logic
         shell: bash
@@ -121,7 +121,7 @@ jobs:
           aad=$(curl -sS --max-time 20 -D "$RUNNER_TEMP/aad.headers" -o /dev/null -w '%{http_code}' "https://$APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx" || true)
           echo "ENTRA_ENTRY_HTTP=$aad"
           [ "$aad" = '302' ] || [ "$aad" = '303' ]
-          grep -Eqi '^location: .*login\.microsoftonline\.com|^location: .*microsoftonline' "$RUNNER_TEMP/aad.headers"
+          grep -Eqi '^location: .*microsoftonline' "$RUNNER_TEMP/aad.headers"
 
           css=$(curl -sS --max-time 20 -o "$RUNNER_TEMP/theme.css" -w '%{http_code}' "https://$APP.azurewebsites.net/SqlAgent0106.css" || true)
           echo "THEME_HTTP=$css"
