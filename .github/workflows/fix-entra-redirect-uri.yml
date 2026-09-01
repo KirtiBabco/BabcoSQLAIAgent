@@ -13,15 +13,9 @@ permissions:
   contents: write
 
 env:
-  DEPLOY_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
   ENTRA_PROVISIONER_CLIENT_ID: 'a6dd8ea2-628c-45bf-a861-8e19df7732da'
-  ENTRA_PROVISIONER_PRINCIPAL_ID: '61ecc86a-f64b-429b-a5c3-4d42db582fe8'
   TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
   SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
-  CONTROL_RG: 'rg-babco-labs-control-prod'
-  PROVISIONER_IDENTITY: 'id-babco-factory-entra-provisioner'
-  FIC_NAME: 'fic-babco-sqlagent-main'
-  FIC_SUBJECT: 'repo:KirtiBabco@186008200/BabcoSQLAIAgent@1340622048:ref:refs/heads/main'
   APP: 'babco-sqlagent-wf-2c606af4'
   ENTRA_APP_CLIENT_ID: '0a49493a-7199-490d-9416-59ea6199861f'
   REQUIRED_REDIRECT_URI: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
@@ -30,37 +24,11 @@ env:
 jobs:
   fix:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure login with deployment identity
-        uses: azure/login@v2
-        with:
-          client-id: ${{ env.DEPLOY_CLIENT_ID }}
-          tenant-id: ${{ env.TENANT_ID }}
-          subscription-id: ${{ env.SUBSCRIPTION_ID }}
-          audience: api://AzureADTokenExchange
-
-      - name: Authorize this repo on verified CAP-047 Entra provisioner
-        shell: bash
-        run: |
-          set -euo pipefail
-          actual_client="$(az identity show -g "$CONTROL_RG" -n "$PROVISIONER_IDENTITY" --query clientId -o tsv)"
-          actual_principal="$(az identity show -g "$CONTROL_RG" -n "$PROVISIONER_IDENTITY" --query principalId -o tsv)"
-          test "$actual_client" = "$ENTRA_PROVISIONER_CLIENT_ID"
-          test "$actual_principal" = "$ENTRA_PROVISIONER_PRINCIPAL_ID"
-          url="https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${CONTROL_RG}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${PROVISIONER_IDENTITY}/federatedIdentityCredentials/${FIC_NAME}?api-version=2023-01-31"
-          body="$(jq -nc --arg subject "$FIC_SUBJECT" '{properties:{issuer:"https://token.actions.githubusercontent.com",subject:$subject,audiences:["api://AzureADTokenExchange"]}}')"
-          az rest --method put --url "$url" --body "$body" --only-show-errors > "$RUNNER_TEMP/fic.json"
-          test "$(jq -r '.properties.subject' "$RUNNER_TEMP/fic.json")" = "$FIC_SUBJECT"
-          echo 'CAP047_SQLAGENT_FIC=true'
-
-      - name: Clear deployment identity session
-        shell: bash
-        run: az account clear
-
-      - name: Login with CAP-047 Entra provisioner
+      - name: Login with verified CAP-047 Entra provisioner
         uses: azure/login@v2
         with:
           client-id: ${{ env.ENTRA_PROVISIONER_CLIENT_ID }}
