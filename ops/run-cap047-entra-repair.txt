@@ -1,0 +1,4 @@
+Repair SQL Agent AADSTS50011 through the verified CAP-047 Entra provisioner.
+Target client: 0a49493a-7199-490d-9416-59ea6199861f
+Add only: https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback
+Preserve every existing redirect URI. Do not change SQL, OpenAI, or App Service auth configuration.
