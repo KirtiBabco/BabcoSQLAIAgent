@@ -1,0 +1,1 @@
+Deploy APP-BAB-0106 inspired theme and relevant SQL Agent functionality. Exclude Outlook/Email and Teams pages. Preserve SQL, OpenAI, authentication, voice, cost/admin and diagnostics behavior.
