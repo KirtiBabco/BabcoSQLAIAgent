@@ -9,7 +9,10 @@ on:
       - 'deploy-overrides/SqlAgent0106.css'
       - 'deploy-overrides/Default.aspx'
       - 'deploy-overrides/Admin.aspx'
+      - 'deploy-overrides/Admin.aspx.cs'
       - 'deploy-overrides/Login.aspx'
+      - 'deploy-overrides/Login.aspx.cs'
+      - 'deploy-overrides/App_Code/AuthService.cs'
       - 'deploy-overrides/Help.aspx'
       - 'deploy-overrides/Standard.aspx'
       - 'deploy-overrides/Diagnostics.aspx'
@@ -26,7 +29,6 @@ env:
   RG: 'rg-babco-rnd-sandbox'
   APP: 'babco-sqlagent-wf-2c606af4'
   LOGIN_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx'
-  ADMIN_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Admin.aspx'
 
 jobs:
   deploy:
@@ -35,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate 0106 experience scope
+      - name: Validate 0106 experience and Entra scope
         shell: bash
         run: |
           set -euo pipefail
@@ -43,8 +45,11 @@ jobs:
           grep -q 'BABCO LABS' deploy-overrides/Default.aspx
           grep -q 'SqlAgent0106.css' deploy-overrides/Default.aspx
           grep -q 'Diagnostics.aspx' deploy-overrides/Default.aspx
-          grep -q 'Cost' deploy-overrides/Admin.aspx
-          grep -q 'Outlook/Email and Teams are intentionally not part' deploy-overrides/Help.aspx
+          grep -q 'Sign in with Microsoft Entra ID' deploy-overrides/Login.aspx
+          grep -q '/.auth/login/aad' deploy-overrides/App_Code/AuthService.cs
+          grep -q 'BootstrapEasyAuthSession' deploy-overrides/App_Code/AuthService.cs
+          ! grep -q 'StartTemporaryAdminSession' deploy-overrides/App_Code/AuthService.cs
+          ! grep -q 'Temporary STD Testing Login' deploy-overrides/Login.aspx.cs
           ! grep -q 'data-view="email"' deploy-overrides/Default.aspx
           ! grep -q 'data-view="teams"' deploy-overrides/Default.aspx
 
@@ -56,7 +61,17 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Deploy 0106 theme and pages
+      - name: Require existing Azure Easy Auth Entra configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          enabled=$(az webapp auth show -g "$RG" -n "$APP" --query 'platform.enabled' -o tsv 2>/dev/null || true)
+          client=$(az webapp auth show -g "$RG" -n "$APP" --query 'identityProviders.azureActiveDirectory.registration.clientId' -o tsv 2>/dev/null || true)
+          echo "EASY_AUTH_ENABLED=$enabled"
+          [ "${enabled,,}" = 'true' ]
+          [ -n "$client" ]
+
+      - name: Deploy 0106 theme pages and Entra app logic
         shell: bash
         run: |
           set -euo pipefail
@@ -74,7 +89,10 @@ jobs:
             [ "$ok" = true ]
           }
           deploy_one deploy-overrides/SqlAgent0106.css SqlAgent0106.css
+          deploy_one deploy-overrides/App_Code/AuthService.cs App_Code/AuthService.cs
+          deploy_one deploy-overrides/Login.aspx.cs Login.aspx.cs
           deploy_one deploy-overrides/Login.aspx Login.aspx
+          deploy_one deploy-overrides/Admin.aspx.cs Admin.aspx.cs
           deploy_one deploy-overrides/Default.aspx Default.aspx
           deploy_one deploy-overrides/Admin.aspx Admin.aspx
           deploy_one deploy-overrides/Help.aspx Help.aspx
@@ -82,34 +100,30 @@ jobs:
           deploy_one deploy-overrides/Diagnostics.aspx Diagnostics.aspx
           az webapp restart -g "$RG" -n "$APP" --only-show-errors >/dev/null
 
-      - name: Verify live 0106 SQL Agent experience
+      - name: Verify live 0106 theme and Entra entry point
         shell: bash
         run: |
           set -euo pipefail
-          rm -f "$RUNNER_TEMP/cookies"
           code=0
           for i in $(seq 1 40); do
-            code=$(curl -sS -L -c "$RUNNER_TEMP/cookies" -b "$RUNNER_TEMP/cookies" --max-time 25 -o "$RUNNER_TEMP/live.html" -w '%{http_code}' "$LOGIN_URL" || true)
-            if [ "$code" = '200' ] && grep -q 'BABCO LABS' "$RUNNER_TEMP/live.html" && grep -q 'SQL AI Agent' "$RUNNER_TEMP/live.html" && grep -q 'Diagnostics.aspx' "$RUNNER_TEMP/live.html" && grep -q 'Ask AI Agent' "$RUNNER_TEMP/live.html"; then break; fi
+            code=$(curl -sS --max-time 25 -o "$RUNNER_TEMP/login.html" -w '%{http_code}' "$LOGIN_URL" || true)
+            if [ "$code" = '200' ] && grep -q 'BABCO LABS' "$RUNNER_TEMP/login.html" && grep -q 'Sign in with Microsoft Entra ID' "$RUNNER_TEMP/login.html"; then break; fi
             sleep 5
           done
-          echo "LOGIN_FLOW_HTTP=$code"
+          echo "LOGIN_HTTP=$code"
           [ "$code" = '200' ]
-          grep -q 'PROTOTYPE' "$RUNNER_TEMP/live.html"
-          grep -q 'BABCO LABS' "$RUNNER_TEMP/live.html"
-          grep -q 'Ask AI Agent' "$RUNNER_TEMP/live.html"
-          grep -q 'webkitSpeechRecognition' "$RUNNER_TEMP/live.html"
-          grep -q 'speechSynthesis' "$RUNNER_TEMP/live.html"
-          ! grep -q '> Outlook<' "$RUNNER_TEMP/live.html"
-          ! grep -q '> Teams<' "$RUNNER_TEMP/live.html"
+          grep -q 'PROTOTYPE' "$RUNNER_TEMP/login.html"
+          grep -q 'BABCO LABS' "$RUNNER_TEMP/login.html"
+          grep -q 'Sign in with Microsoft Entra ID' "$RUNNER_TEMP/login.html"
+          grep -q 'Azure App Service Easy Auth' "$RUNNER_TEMP/login.html"
+          ! grep -q 'Temporary STD' "$RUNNER_TEMP/login.html"
 
-          help=$(curl -sS -b "$RUNNER_TEMP/cookies" --max-time 20 -o "$RUNNER_TEMP/help.html" -w '%{http_code}' "https://$APP.azurewebsites.net/Help.aspx" || true)
-          standard=$(curl -sS -b "$RUNNER_TEMP/cookies" --max-time 20 -o "$RUNNER_TEMP/standard.html" -w '%{http_code}' "https://$APP.azurewebsites.net/Standard.aspx" || true)
-          diag=$(curl -sS -b "$RUNNER_TEMP/cookies" --max-time 20 -o "$RUNNER_TEMP/diag.html" -w '%{http_code}' "https://$APP.azurewebsites.net/Diagnostics.aspx" || true)
-          admin=$(curl -sS -b "$RUNNER_TEMP/cookies" --max-time 20 -o "$RUNNER_TEMP/admin.html" -w '%{http_code}' "$ADMIN_URL" || true)
-          echo "HELP_HTTP=$help STANDARD_HTTP=$standard DIAGNOSTICS_HTTP=$diag ADMIN_HTTP=$admin"
-          [ "$help" = '200' ]
-          [ "$standard" = '200' ]
-          [ "$diag" = '200' ]
-          [ "$admin" = '200' ]
-          grep -q 'AI Usage & Cost' "$RUNNER_TEMP/admin.html"
+          aad=$(curl -sS --max-time 20 -D "$RUNNER_TEMP/aad.headers" -o /dev/null -w '%{http_code}' "https://$APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx" || true)
+          echo "ENTRA_ENTRY_HTTP=$aad"
+          [ "$aad" = '302' ] || [ "$aad" = '303' ]
+          grep -Eqi '^location: .*login\.microsoftonline\.com|^location: .*microsoftonline' "$RUNNER_TEMP/aad.headers"
+
+          css=$(curl -sS --max-time 20 -o "$RUNNER_TEMP/theme.css" -w '%{http_code}' "https://$APP.azurewebsites.net/SqlAgent0106.css" || true)
+          echo "THEME_HTTP=$css"
+          [ "$css" = '200' ]
+          grep -q -- '--orange:#ff7a1a' "$RUNNER_TEMP/theme.css"
