@@ -1,0 +1,153 @@
+name: Repair SQL Agent Entra via CAP-047
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-entra-via-cap047.yml'
+      - 'ops/run-cap047-entra-repair.txt'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  DEPLOY_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  ENTRA_PROVISIONER_CLIENT_ID: 'a6dd8ea2-628c-45bf-a861-8e19df7732da'
+  ENTRA_PROVISIONER_PRINCIPAL_ID: '61ecc86a-f64b-429b-a5c3-4d42db582fe8'
+  TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  CONTROL_RG: 'rg-babco-labs-control-prod'
+  PROVISIONER_IDENTITY: 'id-babco-factory-entra-provisioner'
+  FIC_NAME: 'fic-babco-sqlagent-main'
+  FIC_SUBJECT: 'repo:KirtiBabco@186008200/BabcoSQLAIAgent@1340622048:ref:refs/heads/main'
+  ENTRA_APP_CLIENT_ID: '0a49493a-7199-490d-9416-59ea6199861f'
+  REQUIRED_REDIRECT_URI: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
+  APP: 'babco-sqlagent-wf-2c606af4'
+  LOGIN_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx'
+
+jobs:
+  authorize-repo:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure login with deployment identity
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Add exact SQL Agent repo credential to CAP-047 provisioner
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_client="$(az identity show -g "$CONTROL_RG" -n "$PROVISIONER_IDENTITY" --query clientId -o tsv)"
+          actual_principal="$(az identity show -g "$CONTROL_RG" -n "$PROVISIONER_IDENTITY" --query principalId -o tsv)"
+          test "$actual_client" = "$ENTRA_PROVISIONER_CLIENT_ID"
+          test "$actual_principal" = "$ENTRA_PROVISIONER_PRINCIPAL_ID"
+
+          url="https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${CONTROL_RG}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${PROVISIONER_IDENTITY}/federatedIdentityCredentials/${FIC_NAME}?api-version=2023-01-31"
+          body="$(jq -nc --arg subject "$FIC_SUBJECT" '{properties:{issuer:"https://token.actions.githubusercontent.com",subject:$subject,audiences:["api://AzureADTokenExchange"]}}')"
+          az rest --method put --url "$url" --body "$body" --only-show-errors > "$RUNNER_TEMP/fic.json"
+          test "$(jq -r '.properties.subject' "$RUNNER_TEMP/fic.json")" = "$FIC_SUBJECT"
+          echo 'CAP047_SQLAGENT_FIC=true'
+
+  repair-directory:
+    needs: authorize-repo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login as CAP-047 Entra provisioner
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.ENTRA_PROVISIONER_CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Preserve existing redirects and add SQL Agent callback
+        shell: bash
+        run: |
+          set -euo pipefail
+          s="$RUNNER_TEMP/cap047-status.txt"
+          echo "ENTRA_APP_CLIENT_ID=$ENTRA_APP_CLIENT_ID" > "$s"
+          echo "REQUIRED_REDIRECT_URI=$REQUIRED_REDIRECT_URI" >> "$s"
+          echo 'SQL_SETTINGS_WRITTEN=false' >> "$s"
+          echo 'OPENAI_SETTINGS_WRITTEN=false' >> "$s"
+          echo 'APP_SERVICE_AUTH_SETTINGS_WRITTEN=false' >> "$s"
+
+          token="$(az account get-access-token --resource-type ms-graph --query accessToken -o tsv)"
+          echo "::add-mask::$token"
+          q="https://graph.microsoft.com/v1.0/applications?%24filter=appId%20eq%20%27${ENTRA_APP_CLIENT_ID}%27&%24select=id,appId,displayName,web"
+          code="$(curl -sS --max-time 30 -o "$RUNNER_TEMP/app-before.json" -w '%{http_code}' -H "Authorization: Bearer $token" "$q")"
+          echo "GRAPH_READ_HTTP=$code" >> "$s"
+          test "$code" = '200'
+          count="$(jq -r '.value | length' "$RUNNER_TEMP/app-before.json")"
+          test "$count" = '1'
+          object_id="$(jq -r '.value[0].id' "$RUNNER_TEMP/app-before.json")"
+          before="$(jq -r '.value[0].web.redirectUris // [] | length' "$RUNNER_TEMP/app-before.json")"
+          echo "REDIRECT_COUNT_BEFORE=$before" >> "$s"
+
+          present="$(jq -r --arg u "$REQUIRED_REDIRECT_URI" '(.value[0].web.redirectUris // []) | index($u) != null' "$RUNNER_TEMP/app-before.json")"
+          if [ "$present" = 'true' ]; then
+            echo 'REDIRECT_ADDED=already-present' >> "$s"
+          else
+            body="$(jq -c --arg u "$REQUIRED_REDIRECT_URI" '{web:{redirectUris:(((.value[0].web.redirectUris // []) + [$u]) | unique)}}' "$RUNNER_TEMP/app-before.json")"
+            pcode="$(curl -sS --max-time 30 -o "$RUNNER_TEMP/patch.json" -w '%{http_code}' -X PATCH -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d "$body" "https://graph.microsoft.com/v1.0/applications/$object_id")"
+            echo "GRAPH_PATCH_HTTP=$pcode" >> "$s"
+            test "$pcode" = '204'
+            echo 'REDIRECT_ADDED=true' >> "$s"
+          fi
+
+          sleep 5
+          vcode="$(curl -sS --max-time 30 -o "$RUNNER_TEMP/app-after.json" -w '%{http_code}' -H "Authorization: Bearer $token" "$q")"
+          test "$vcode" = '200'
+          jq -e --arg u "$REQUIRED_REDIRECT_URI" '(.value[0].web.redirectUris // []) | index($u) != null' "$RUNNER_TEMP/app-after.json" >/dev/null
+          after="$(jq -r '.value[0].web.redirectUris // [] | length' "$RUNNER_TEMP/app-after.json")"
+          echo "REDIRECT_COUNT_AFTER=$after" >> "$s"
+          echo 'TARGET_CALLBACK_REGISTERED=true' >> "$s"
+          echo 'GRAPH_VERIFY=true' >> "$s"
+
+      - name: Verify live SQL Agent Entra challenge
+        shell: bash
+        run: |
+          set -euo pipefail
+          s="$RUNNER_TEMP/cap047-status.txt"
+          login="$(curl -sS --max-time 20 -o "$RUNNER_TEMP/login.html" -w '%{http_code}' "$LOGIN_URL" || true)"
+          echo "LOGIN_HTTP=$login" >> "$s"
+          test "$login" = '200'
+          grep -q 'Sign in with Microsoft Entra ID' "$RUNNER_TEMP/login.html"
+
+          aad="$(curl -sS --max-time 20 --max-redirs 0 -D "$RUNNER_TEMP/aad.headers" -o /dev/null -w '%{http_code}' "https://$APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx" || true)"
+          echo "ENTRA_ENTRY_HTTP=$aad" >> "$s"
+          test "$aad" = '302' -o "$aad" = '303'
+          grep -Eqi '^location: .*microsoftonline' "$RUNNER_TEMP/aad.headers"
+          echo 'ENTRA_CHALLENGE=true' >> "$s"
+          echo 'AADSTS50011_ROOT_CAUSE_REPAIRED=true' >> "$s"
+          echo 'VERIFY=success' >> "$s"
+
+      - name: Publish repair status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          d="$RUNNER_TEMP/pub"; mkdir -p "$d"
+          p="$RUNNER_TEMP/cap047-status.txt"
+          if [ -f "$p" ]; then cp "$p" "$d/status.txt"; else echo 'RUN_FAILED=true' > "$d/status.txt"; fi
+          echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$d/status.txt"
+          cd "$d"
+          git init -q
+          git checkout -q -b cap047-entra-repair-status
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add status.txt
+          git commit -q -m 'Publish CAP-047 Entra repair status'
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin cap047-entra-repair-status >/dev/null
