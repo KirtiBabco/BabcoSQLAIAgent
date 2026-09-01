@@ -44,7 +44,7 @@ jobs:
           grep -q 'SqlAgent0106.css' deploy-overrides/Default.aspx
           grep -q 'Diagnostics.aspx' deploy-overrides/Default.aspx
           grep -q 'Cost' deploy-overrides/Admin.aspx
-          grep -q 'Outlook / Email and Teams are intentionally not part' deploy-overrides/Help.aspx
+          grep -q 'Outlook/Email and Teams are intentionally not part' deploy-overrides/Help.aspx
           ! grep -q 'data-view="email"' deploy-overrides/Default.aspx
           ! grep -q 'data-view="teams"' deploy-overrides/Default.aspx
 
