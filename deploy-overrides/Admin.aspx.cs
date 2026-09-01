@@ -1,7 +1,6 @@
 using System;
 using System.Configuration;
 using System.Globalization;
-using System.Web;
 using System.Web.UI;
 
 namespace SQL_AI_Agent
@@ -10,7 +9,7 @@ namespace SQL_AI_Agent
     {
         public string UserEmail { get; private set; }
         public string UserName { get; private set; }
-        public string AuthProvider { get { return "Temporary STD Testing Login"; } }
+        public string AuthProvider { get { return "Microsoft Entra ID / Azure App Service Easy Auth"; } }
         public string OpenAIModel { get; private set; }
         public string OpenAIKeyStatus { get; private set; }
         public string SqlSettingStatus { get; private set; }
