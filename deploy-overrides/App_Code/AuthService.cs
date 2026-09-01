@@ -9,9 +9,8 @@ namespace SQL_AI_Agent
         {
             get
             {
-                return HttpContext.Current != null &&
-                       HttpContext.Current.Session != null &&
-                       !string.IsNullOrWhiteSpace(Convert.ToString(HttpContext.Current.Session["UserID"]));
+                BootstrapEasyAuthSession(HttpContext.Current == null ? null : HttpContext.Current.Request);
+                return HttpContext.Current != null && HttpContext.Current.Session != null && !string.IsNullOrWhiteSpace(Convert.ToString(HttpContext.Current.Session["UserID"]));
             }
         }
 
@@ -19,40 +18,42 @@ namespace SQL_AI_Agent
         public static string CurrentUserName { get { return GetSession("UserName"); } }
         public static string CurrentUserEmail { get { return GetSession("UserEmail"); } }
         public static bool IsAdmin { get { return string.Equals(GetSession("UserRole"), "Admin", StringComparison.OrdinalIgnoreCase); } }
-        public static bool IsEntraConfigured { get { return false; } }
+        public static bool IsEntraConfigured { get { return true; } }
 
-        public static string GetEntraConfigurationStatus()
-        {
-            return "Temporarily disabled - STD testing login active";
-        }
-
-        public static void StartTemporaryAdminSession()
-        {
-            if (HttpContext.Current == null || HttpContext.Current.Session == null)
-                throw new InvalidOperationException("ASP.NET session is unavailable.");
-
-            HttpContext.Current.Session["UserID"] = "STD-TEST-ADMIN";
-            HttpContext.Current.Session["UserName"] = "Test Admin";
-            HttpContext.Current.Session["FullName"] = "Test Admin";
-            HttpContext.Current.Session["UserEmail"] = "test-admin@local";
-            HttpContext.Current.Session["UserRole"] = "Admin";
-            HttpContext.Current.Session["UserType"] = "TemporaryTest";
-            HttpContext.Current.Session["LoginDate"] = DateTime.UtcNow;
-        }
+        public static string GetEntraConfigurationStatus() { return "Azure App Service Easy Auth / Microsoft Entra ID"; }
 
         public static string BuildEntraAuthorizationUrl(HttpRequest request)
         {
-            return VirtualPathUtility.ToAbsolute("~/Login.aspx");
+            string callback = VirtualPathUtility.ToAbsolute("~/AuthComplete.aspx");
+            return "/.auth/login/aad?post_login_redirect_uri=" + HttpUtility.UrlEncode(callback);
         }
 
         public static string BuildEntraLogoutUrl(HttpRequest request)
         {
-            return VirtualPathUtility.ToAbsolute("~/Login.aspx");
+            string login = VirtualPathUtility.ToAbsolute("~/Login.aspx");
+            return "/.auth/logout?post_logout_redirect_uri=" + HttpUtility.UrlEncode(login);
         }
 
         public static bool BootstrapEasyAuthSession(HttpRequest request)
         {
-            return IsSignedIn;
+            if (request == null || HttpContext.Current == null || HttpContext.Current.Session == null) return false;
+            if (!string.IsNullOrWhiteSpace(Convert.ToString(HttpContext.Current.Session["UserID"]))) return true;
+
+            string email = FirstNonEmpty(request.Headers["X-MS-CLIENT-PRINCIPAL-NAME"], request.Headers["X-MS-CLIENT-PRINCIPAL-ID"]);
+            string id = FirstNonEmpty(request.Headers["X-MS-CLIENT-PRINCIPAL-ID"], email);
+            if (string.IsNullOrWhiteSpace(id)) return false;
+
+            string displayName = email;
+            if (!string.IsNullOrWhiteSpace(email) && email.IndexOf('@') > 0) displayName = email.Substring(0, email.IndexOf('@'));
+
+            HttpContext.Current.Session["UserID"] = id;
+            HttpContext.Current.Session["UserName"] = displayName;
+            HttpContext.Current.Session["FullName"] = displayName;
+            HttpContext.Current.Session["UserEmail"] = email;
+            HttpContext.Current.Session["UserRole"] = IsAdminEmail(email) ? "Admin" : "User";
+            HttpContext.Current.Session["UserType"] = "EntraID";
+            HttpContext.Current.Session["LoginDate"] = DateTime.UtcNow;
+            return true;
         }
 
         public static void RequireLogin(HttpResponse response)
@@ -64,11 +65,7 @@ namespace SQL_AI_Agent
 
         public static void RequireAdmin(HttpResponse response)
         {
-            if (!IsSignedIn)
-            {
-                RequireLogin(response);
-                return;
-            }
+            RequireLogin(response);
             if (IsAdmin) return;
             response.StatusCode = 403;
             response.TrySkipIisCustomErrors = true;
@@ -85,9 +82,24 @@ namespace SQL_AI_Agent
 
         private static string GetSession(string key)
         {
-            return HttpContext.Current == null || HttpContext.Current.Session == null
-                ? ""
-                : Convert.ToString(HttpContext.Current.Session[key]);
+            BootstrapEasyAuthSession(HttpContext.Current == null ? null : HttpContext.Current.Request);
+            return HttpContext.Current == null || HttpContext.Current.Session == null ? "" : Convert.ToString(HttpContext.Current.Session[key]);
+        }
+
+        private static bool IsAdminEmail(string email)
+        {
+            if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(AppConfig.AdminEmails)) return false;
+            string[] values = AppConfig.AdminEmails.Split(new[] { ',', ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string value in values)
+                if (string.Equals(value.Trim(), email.Trim(), StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            foreach (string value in values)
+                if (!string.IsNullOrWhiteSpace(value)) return value.Trim();
+            return "";
         }
     }
 }
