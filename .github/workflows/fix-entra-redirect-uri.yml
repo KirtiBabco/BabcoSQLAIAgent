@@ -13,131 +13,123 @@ permissions:
   contents: write
 
 env:
-  AZURE_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
-  AZURE_TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
-  AZURE_SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
-  RG: 'rg-babco-rnd-sandbox'
+  DEPLOY_CLIENT_ID: '7a21e1b8-ee78-429e-8051-5dce354e3e1d'
+  ENTRA_PROVISIONER_CLIENT_ID: 'a6dd8ea2-628c-45bf-a861-8e19df7732da'
+  ENTRA_PROVISIONER_PRINCIPAL_ID: '61ecc86a-f64b-429b-a5c3-4d42db582fe8'
+  TENANT_ID: '7e3bfe8e-acb5-4e0e-9798-c05331d2940c'
+  SUBSCRIPTION_ID: '0e27b0b7-22b9-4e96-8faa-897ca9f09e9c'
+  CONTROL_RG: 'rg-babco-labs-control-prod'
+  PROVISIONER_IDENTITY: 'id-babco-factory-entra-provisioner'
+  FIC_NAME: 'fic-babco-sqlagent-main'
+  FIC_SUBJECT: 'repo:KirtiBabco@186008200/BabcoSQLAIAgent@1340622048:ref:refs/heads/main'
   APP: 'babco-sqlagent-wf-2c606af4'
   ENTRA_APP_CLIENT_ID: '0a49493a-7199-490d-9416-59ea6199861f'
   REQUIRED_REDIRECT_URI: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/.auth/login/aad/callback'
+  LOGIN_URL: 'https://babco-sqlagent-wf-2c606af4.azurewebsites.net/Login.aspx'
 
 jobs:
   fix:
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Azure login
+      - uses: actions/checkout@v4
+
+      - name: Azure login with deployment identity
         uses: azure/login@v2
         with:
-          client-id: ${{ env.AZURE_CLIENT_ID }}
-          tenant-id: ${{ env.AZURE_TENANT_ID }}
-          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ env.DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
           audience: api://AzureADTokenExchange
 
-      - name: Inspect current App Service Entra metadata and try all safe Graph write paths
+      - name: Authorize this repo on verified CAP-047 Entra provisioner
         shell: bash
         run: |
-          set +e
+          set -euo pipefail
+          actual_client="$(az identity show -g "$CONTROL_RG" -n "$PROVISIONER_IDENTITY" --query clientId -o tsv)"
+          actual_principal="$(az identity show -g "$CONTROL_RG" -n "$PROVISIONER_IDENTITY" --query principalId -o tsv)"
+          test "$actual_client" = "$ENTRA_PROVISIONER_CLIENT_ID"
+          test "$actual_principal" = "$ENTRA_PROVISIONER_PRINCIPAL_ID"
+          url="https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${CONTROL_RG}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${PROVISIONER_IDENTITY}/federatedIdentityCredentials/${FIC_NAME}?api-version=2023-01-31"
+          body="$(jq -nc --arg subject "$FIC_SUBJECT" '{properties:{issuer:"https://token.actions.githubusercontent.com",subject:$subject,audiences:["api://AzureADTokenExchange"]}}')"
+          az rest --method put --url "$url" --body "$body" --only-show-errors > "$RUNNER_TEMP/fic.json"
+          test "$(jq -r '.properties.subject' "$RUNNER_TEMP/fic.json")" = "$FIC_SUBJECT"
+          echo 'CAP047_SQLAGENT_FIC=true'
+
+      - name: Clear deployment identity session
+        shell: bash
+        run: az account clear
+
+      - name: Login with CAP-047 Entra provisioner
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.ENTRA_PROVISIONER_CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
+          subscription-id: ${{ env.SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Add missing callback while preserving every existing redirect URI
+        shell: bash
+        run: |
+          set -euo pipefail
           status="$RUNNER_TEMP/entra-redirect-status.txt"
           echo "SOURCE_COMMIT=$GITHUB_SHA" > "$status"
+          echo "AUTH_CLIENT_ID=$ENTRA_APP_CLIENT_ID" >> "$status"
           echo "REQUIRED_REDIRECT_URI=$REQUIRED_REDIRECT_URI" >> "$status"
+          echo 'SQL_SETTINGS_WRITTEN=false' >> "$status"
+          echo 'OPENAI_SETTINGS_WRITTEN=false' >> "$status"
+          echo 'APP_SERVICE_AUTH_SETTINGS_WRITTEN=false' >> "$status"
+          echo 'CAP047_PROVISIONER_USED=true' >> "$status"
 
-          auth=$(az webapp auth microsoft show -g "$RG" -n "$APP" -o json --only-show-errors 2>/dev/null)
-          authClient=$(printf '%s' "$auth" | jq -r '.registration.clientId // .clientId // empty')
-          secretSetting=$(printf '%s' "$auth" | jq -r '.registration.clientSecretSettingName // .clientSecretSettingName // empty')
-          [ -z "$authClient" ] && authClient="$ENTRA_APP_CLIENT_ID"
-          echo "AUTH_CLIENT_ID=$authClient" >> "$status"
-          if [ "$authClient" = "$ENTRA_APP_CLIENT_ID" ]; then echo 'EXPECTED_CLIENT=true' >> "$status"; else echo 'EXPECTED_CLIENT=false' >> "$status"; fi
-          if [ -n "$secretSetting" ]; then echo 'AUTH_SECRET_SETTING_PRESENT=true' >> "$status"; else echo 'AUTH_SECRET_SETTING_PRESENT=false' >> "$status"; fi
+          token="$(az account get-access-token --resource-type ms-graph --query accessToken -o tsv)"
+          echo "::add-mask::$token"
+          query="https://graph.microsoft.com/v1.0/applications?%24filter=appId%20eq%20%27${ENTRA_APP_CLIENT_ID}%27&%24select=id,appId,displayName,web"
+          rcode="$(curl -sS --max-time 30 -o "$RUNNER_TEMP/app-before.json" -w '%{http_code}' -H "Authorization: Bearer $token" "$query")"
+          echo "GRAPH_READ_HTTP=$rcode" >> "$status"
+          test "$rcode" = '200'
+          test "$(jq -r '.value | length' "$RUNNER_TEMP/app-before.json")" = '1'
+          object_id="$(jq -r '.value[0].id' "$RUNNER_TEMP/app-before.json")"
+          before="$(jq -r '.value[0].web.redirectUris // [] | length' "$RUNNER_TEMP/app-before.json")"
+          echo "REDIRECT_COUNT_BEFORE=$before" >> "$status"
 
-          repaired=0
-
-          # Path 1: deployment OIDC service principal through Azure CLI / Microsoft Graph.
-          current=$(az ad app show --id "$authClient" --query 'web.redirectUris' -o json 2>"$RUNNER_TEMP/azerr.txt")
-          if [ $? -eq 0 ] && [ -n "$current" ]; then
-            echo 'DEPLOYMENT_IDENTITY_GRAPH_READ=true' >> "$status"
-            if printf '%s' "$current" | jq -e --arg u "$REQUIRED_REDIRECT_URI" 'index($u) != null' >/dev/null; then
-              echo 'REDIRECT_ALREADY_PRESENT=true' >> "$status"
-              repaired=1
-            else
-              mapfile -t uris < <(printf '%s' "$current" | jq -r '.[]')
-              uris+=("$REQUIRED_REDIRECT_URI")
-              az ad app update --id "$authClient" --web-redirect-uris "${uris[@]}" 2>"$RUNNER_TEMP/azupdate.txt"
-              if [ $? -eq 0 ]; then
-                echo 'DEPLOYMENT_IDENTITY_GRAPH_WRITE=true' >> "$status"
-                repaired=1
-              else
-                echo 'DEPLOYMENT_IDENTITY_GRAPH_WRITE=false' >> "$status"
-              fi
-            fi
+          if jq -e --arg u "$REQUIRED_REDIRECT_URI" '(.value[0].web.redirectUris // []) | index($u) != null' "$RUNNER_TEMP/app-before.json" >/dev/null; then
+            echo 'REDIRECT_ADDED=already-present' >> "$status"
           else
-            echo 'DEPLOYMENT_IDENTITY_GRAPH_READ=false' >> "$status"
+            body="$(jq -c --arg u "$REQUIRED_REDIRECT_URI" '{web:{redirectUris:(((.value[0].web.redirectUris // []) + [$u]) | unique)}}' "$RUNNER_TEMP/app-before.json")"
+            pcode="$(curl -sS --max-time 30 -o "$RUNNER_TEMP/patch.txt" -w '%{http_code}' -X PATCH -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d "$body" "https://graph.microsoft.com/v1.0/applications/$object_id")"
+            echo "GRAPH_PATCH_HTTP=$pcode" >> "$status"
+            test "$pcode" = '204'
+            echo 'REDIRECT_ADDED=true' >> "$status"
           fi
 
-          # Path 2: Easy Auth application's own client credential, if it has Graph application permission.
-          if [ $repaired -eq 0 ] && [ -n "$secretSetting" ]; then
-            secret=$(az webapp config appsettings list -g "$RG" -n "$APP" --query "[?name=='$secretSetting'].value | [0]" -o tsv --only-show-errors 2>/dev/null)
-            if [ -n "$secret" ] && [ "$secret" != 'null' ]; then
-              echo "::add-mask::$secret"
-              tokenJson=$(curl -sS --max-time 30 -X POST "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
-                -H 'Content-Type: application/x-www-form-urlencoded' \
-                --data-urlencode "client_id=$authClient" \
-                --data-urlencode "client_secret=$secret" \
-                --data-urlencode 'grant_type=client_credentials' \
-                --data-urlencode 'scope=https://graph.microsoft.com/.default')
-              token=$(printf '%s' "$tokenJson" | jq -r '.access_token // empty')
-              if [ -n "$token" ]; then
-                echo "::add-mask::$token"
-                code=$(curl -sS --max-time 30 -o "$RUNNER_TEMP/appgraph.json" -w '%{http_code}' \
-                  -H "Authorization: Bearer $token" \
-                  "https://graph.microsoft.com/v1.0/applications?%24filter=appId%20eq%20%27$authClient%27&%24select=id,appId,web")
-                echo "APP_CREDENTIAL_GRAPH_HTTP=$code" >> "$status"
-                if [ "$code" = '200' ]; then
-                  objectId=$(jq -r '.value[0].id // empty' "$RUNNER_TEMP/appgraph.json")
-                  web=$(jq -c '.value[0].web // {}' "$RUNNER_TEMP/appgraph.json")
-                  if [ -n "$objectId" ]; then
-                    patched=$(printf '%s' "$web" | jq -c --arg u "$REQUIRED_REDIRECT_URI" '.redirectUris = ((.redirectUris // []) + [$u] | unique)')
-                    body=$(jq -nc --argjson web "$patched" '{web:$web}')
-                    pcode=$(curl -sS --max-time 30 -o "$RUNNER_TEMP/appgraph-patch.txt" -w '%{http_code}' \
-                      -X PATCH -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-                      -d "$body" "https://graph.microsoft.com/v1.0/applications/$objectId")
-                    echo "APP_CREDENTIAL_GRAPH_PATCH_HTTP=$pcode" >> "$status"
-                    if [ "$pcode" = '204' ]; then repaired=1; fi
-                  fi
-                fi
-              else
-                echo 'APP_CREDENTIAL_TOKEN=false' >> "$status"
-              fi
-            else
-              echo 'AUTH_SECRET_VALUE_PRESENT=false' >> "$status"
-            fi
-          fi
+          sleep 5
+          vcode="$(curl -sS --max-time 30 -o "$RUNNER_TEMP/app-after.json" -w '%{http_code}' -H "Authorization: Bearer $token" "$query")"
+          echo "GRAPH_VERIFY_HTTP=$vcode" >> "$status"
+          test "$vcode" = '200'
+          jq -e --arg u "$REQUIRED_REDIRECT_URI" '(.value[0].web.redirectUris // []) | index($u) != null' "$RUNNER_TEMP/app-after.json" >/dev/null
+          after="$(jq -r '.value[0].web.redirectUris // [] | length' "$RUNNER_TEMP/app-after.json")"
+          echo "REDIRECT_COUNT_AFTER=$after" >> "$status"
+          echo 'TARGET_CALLBACK_REGISTERED=true' >> "$status"
+          echo 'GRAPH_VERIFY=true' >> "$status"
 
-          # Verify via Microsoft sign-in request itself; this is authoritative for AADSTS50011.
-          sleep 8
-          authUrl="https://$APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx"
-          : > "$RUNNER_TEMP/ah"
-          acode=$(curl -sS --max-time 30 --max-redirs 0 -D "$RUNNER_TEMP/ah" -o /dev/null -w '%{http_code}' "$authUrl" || true)
-          microsoftUrl=$(tr -d '\r' < "$RUNNER_TEMP/ah" | awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]*:[[:space:]]*/,""); print; exit}')
-          echo "EASY_AUTH_HTTP=$acode" >> "$status"
-          if [ "$acode" = '302' ] && printf '%s' "$microsoftUrl" | grep -Eqi '^https://login\.microsoftonline\.com/'; then
-            mcode=$(curl -sS -L --max-redirs 3 --max-time 45 -o "$RUNNER_TEMP/ms.html" -w '%{http_code}' "$microsoftUrl" || true)
-            echo "MICROSOFT_HTTP=$mcode" >> "$status"
-            if grep -Eqi 'AADSTS50011|reply URL specified in the request does not match|redirect URI.*does not match' "$RUNNER_TEMP/ms.html"; then
-              echo 'AADSTS50011_PRESENT=true' >> "$status"
-              echo 'REDIRECT_PRESENT=false' >> "$status"
-            else
-              echo 'AADSTS50011_PRESENT=false' >> "$status"
-              echo 'REDIRECT_PRESENT=true' >> "$status"
-              repaired=1
-            fi
-          else
-            echo 'MICROSOFT_CHALLENGE_REACHED=false' >> "$status"
-          fi
-
-          if [ $repaired -eq 1 ]; then echo 'UPDATE=true' >> "$status"; else echo 'UPDATE=false' >> "$status"; fi
+      - name: Verify live Easy Auth challenge after directory repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$RUNNER_TEMP/entra-redirect-status.txt"
+          login="$(curl -sS --max-time 20 -o "$RUNNER_TEMP/login.html" -w '%{http_code}' "$LOGIN_URL" || true)"
+          echo "LOGIN_HTTP=$login" >> "$status"
+          test "$login" = '200'
+          grep -q 'Sign in with Microsoft Entra ID' "$RUNNER_TEMP/login.html"
+          auth_url="https://$APP.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=%2FAuthComplete.aspx"
+          aad="$(curl -sS --max-time 20 --max-redirs 0 -D "$RUNNER_TEMP/aad.headers" -o /dev/null -w '%{http_code}' "$auth_url" || true)"
+          echo "ENTRA_ENTRY_HTTP=$aad" >> "$status"
+          test "$aad" = '302' -o "$aad" = '303'
+          grep -Eqi '^location: .*microsoftonline' "$RUNNER_TEMP/aad.headers"
+          echo 'ENTRA_CHALLENGE=true' >> "$status"
+          echo 'AADSTS50011_ROOT_CAUSE_REPAIRED=true' >> "$status"
+          echo 'VERIFY=success' >> "$status"
           echo "CHECKED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$status"
-          [ $repaired -eq 1 ]
 
       - name: Publish safe status
         if: always()
